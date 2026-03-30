@@ -1,0 +1,8 @@
+# Python
+server/venv/
+__pycache__/
+*.pyc
+
+# Local data
+server/data/expenses.json
+server/data/rag_texts.txt
