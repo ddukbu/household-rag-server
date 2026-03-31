@@ -1,34 +1,24 @@
-import json
-from pathlib import Path
 from typing import List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from app.rag_engine import (
-    ensure_data_files,
-    load_expenses,
-    rebuild_rag_texts,
-    answer_question,
-)
+from app.firebase_client import get_firestore_client
+from app.rag_engine import answer_question
 
 app = FastAPI(title="HouseHold RAG API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 배포 후엔 필요한 도메인만 허용하는 게 더 안전함
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-DATA_DIR = Path("data")
-EXPENSES_FILE = DATA_DIR / "expenses.json"
-
-DATA_DIR.mkdir(exist_ok=True)
-if not EXPENSES_FILE.exists():
-    EXPENSES_FILE.write_text("[]", encoding="utf-8")
+db = get_firestore_client()
+expenses_ref = db.collection("expenses")
 
 
 class ExpenseIn(BaseModel):
@@ -41,7 +31,7 @@ class ExpenseIn(BaseModel):
 
 
 class Expense(ExpenseIn):
-    id: int
+    id: str
 
 
 class AskRequest(BaseModel):
@@ -51,20 +41,6 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     references: List[str]
-
-
-def save_expenses(expenses):
-    EXPENSES_FILE.write_text(
-        json.dumps(expenses, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-    rebuild_rag_texts(expenses)
-
-
-@app.on_event("startup")
-def startup_event():
-    ensure_data_files()
-    rebuild_rag_texts(load_expenses())
 
 
 @app.get("/")
@@ -79,50 +55,47 @@ def health():
 
 @app.get("/expenses", response_model=List[Expense])
 def get_expenses():
-    return load_expenses()
+    docs = expenses_ref.stream()
+    expenses = []
+    for doc in docs:
+        data = doc.to_dict()
+        expenses.append({
+            "id": doc.id,
+            **data
+        })
+    return expenses
 
 
 @app.post("/expenses", response_model=Expense)
 def create_expense(expense_in: ExpenseIn):
-    expenses = load_expenses()
-    next_id = max([e["id"] for e in expenses], default=0) + 1
-
-    expense = {
-        "id": next_id,
+    doc_ref = expenses_ref.document()
+    doc_ref.set(expense_in.model_dump())
+    return {
+        "id": doc_ref.id,
         **expense_in.model_dump()
     }
 
-    expenses.append(expense)
-    save_expenses(expenses)
-    return expense
-
 
 @app.put("/expenses/{expense_id}", response_model=Expense)
-def update_expense(expense_id: int, expense_in: ExpenseIn):
-    expenses = load_expenses()
+def update_expense(expense_id: str, expense_in: ExpenseIn):
+    doc_ref = expenses_ref.document(expense_id)
+    if not doc_ref.get().exists:
+        raise HTTPException(status_code=404, detail="Expense not found")
 
-    for i, e in enumerate(expenses):
-        if e["id"] == expense_id:
-            updated = {
-                "id": expense_id,
-                **expense_in.model_dump()
-            }
-            expenses[i] = updated
-            save_expenses(expenses)
-            return updated
-
-    raise HTTPException(status_code=404, detail="Expense not found")
+    doc_ref.set(expense_in.model_dump())
+    return {
+        "id": expense_id,
+        **expense_in.model_dump()
+    }
 
 
 @app.delete("/expenses/{expense_id}")
-def delete_expense(expense_id: int):
-    expenses = load_expenses()
-    new_expenses = [e for e in expenses if e["id"] != expense_id]
-
-    if len(new_expenses) == len(expenses):
+def delete_expense(expense_id: str):
+    doc_ref = expenses_ref.document(expense_id)
+    if not doc_ref.get().exists:
         raise HTTPException(status_code=404, detail="Expense not found")
 
-    save_expenses(new_expenses)
+    doc_ref.delete()
     return {"message": "deleted"}
 
 

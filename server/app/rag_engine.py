@@ -1,19 +1,16 @@
-import json
-import os
 import re
 import time
 from collections import defaultdict
-from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-EXPENSES_FILE = DATA_DIR / "expenses.json"
-RAG_TEXTS_FILE = DATA_DIR / "rag_texts.txt"
+from app.firebase_client import get_firestore_client
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+db = get_firestore_client()
+expenses_ref = db.collection("expenses")
+
+GEMINI_API_KEY = __import__("os").environ.get("GEMINI_API_KEY", "")
 GENERATION_MODEL = "gemini-2.5-flash"
 GENERATE_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -21,20 +18,16 @@ GENERATE_URL = (
 )
 
 
-def ensure_data_files() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not EXPENSES_FILE.exists():
-        EXPENSES_FILE.write_text("[]", encoding="utf-8")
-    if not RAG_TEXTS_FILE.exists():
-        RAG_TEXTS_FILE.write_text("", encoding="utf-8")
-
-
 def load_expenses() -> List[Dict[str, Any]]:
-    ensure_data_files()
-    try:
-        return json.loads(EXPENSES_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
+    docs = expenses_ref.stream()
+    expenses = []
+    for doc in docs:
+        data = doc.to_dict()
+        expenses.append({
+            "id": doc.id,
+            **data
+        })
+    return expenses
 
 
 def expense_to_sentence(expense: Dict[str, Any]) -> str:
@@ -82,39 +75,22 @@ def build_monthly_summary(expenses: List[Dict[str, Any]]) -> List[Dict[str, str]
             else:
                 diff_text = "전월 대비 총지출 변화가 없다."
 
-        text = (
-            f"{month} 소비 요약이다. "
-            f"총지출은 {total}원이다. "
-            f"가장 큰 지출 카테고리는 {top_category}이며 해당 지출은 {top_amount}원이다. "
-            f"{diff_text}"
-        )
-
         summaries.append({
             "ref": f"summary:{month}",
-            "text": text
+            "text": (
+                f"{month} 소비 요약이다. "
+                f"총지출은 {total}원이다. "
+                f"가장 큰 지출 카테고리는 {top_category}이며 해당 지출은 {top_amount}원이다. "
+                f"{diff_text}"
+            )
         })
         previous_total = total
 
     return summaries
 
 
-def rebuild_rag_texts(expenses: List[Dict[str, Any]]) -> None:
-    ensure_data_files()
-
-    lines = []
-    for expense in expenses:
-        lines.append(f"[expense:{expense['id']}] {expense_to_sentence(expense)}")
-
-    summaries = build_monthly_summary(expenses)
-    for s in summaries:
-        lines.append(f"[{s['ref']}] {s['text']}")
-
-    RAG_TEXTS_FILE.write_text("\n".join(lines), encoding="utf-8")
-
-
 def build_rag_documents(expenses: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     docs = []
-
     for expense in expenses:
         docs.append({
             "ref": f"expense:{expense['id']}",
@@ -188,7 +164,6 @@ def call_gemini(prompt: str) -> str:
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY,
     }
-
     payload = {
         "contents": [
             {
