@@ -111,25 +111,3 @@ def delete_expense(expense_id: str):
 @app.post("/ask", response_model=AskResponse)
 def ask_api(request: AskRequest):
     return answer_question(request.question)
-
-
-@app.post("/rebuild-embeddings")
-def rebuild_embeddings():
-    docs = expenses_ref.stream()
-    count = 0
-
-    for doc in docs:
-        data = doc.to_dict()
-        base_expense = {
-            "date": data["date"],
-            "category": data["category"],
-            "amount": data["amount"],
-            "payment_method": data["payment_method"],
-            "place": data["place"],
-            "memo": data["memo"],
-        }
-        record = build_expense_rag_record(base_expense)
-        expenses_ref.document(doc.id).set(record)
-        count += 1
-
-    return {"message": f"{count}개 문서 임베딩 재생성 완료"}
