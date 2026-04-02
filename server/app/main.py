@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.firebase_client import get_firestore_client
-from app.rag_engine import answer_question
+from app.rag_engine import answer_question, build_expense_rag_record
 
 app = FastAPI(title="HouseHold RAG API")
 
@@ -61,7 +61,12 @@ def get_expenses():
         data = doc.to_dict()
         expenses.append({
             "id": doc.id,
-            **data
+            "date": data["date"],
+            "category": data["category"],
+            "amount": data["amount"],
+            "payment_method": data["payment_method"],
+            "place": data["place"],
+            "memo": data["memo"],
         })
     return expenses
 
@@ -69,7 +74,9 @@ def get_expenses():
 @app.post("/expenses", response_model=Expense)
 def create_expense(expense_in: ExpenseIn):
     doc_ref = expenses_ref.document()
-    doc_ref.set(expense_in.model_dump())
+    record = build_expense_rag_record(expense_in.model_dump())
+    doc_ref.set(record)
+
     return {
         "id": doc_ref.id,
         **expense_in.model_dump()
@@ -82,7 +89,9 @@ def update_expense(expense_id: str, expense_in: ExpenseIn):
     if not doc_ref.get().exists:
         raise HTTPException(status_code=404, detail="Expense not found")
 
-    doc_ref.set(expense_in.model_dump())
+    record = build_expense_rag_record(expense_in.model_dump())
+    doc_ref.set(record)
+
     return {
         "id": expense_id,
         **expense_in.model_dump()
@@ -102,3 +111,25 @@ def delete_expense(expense_id: str):
 @app.post("/ask", response_model=AskResponse)
 def ask_api(request: AskRequest):
     return answer_question(request.question)
+
+
+@app.post("/rebuild-embeddings")
+def rebuild_embeddings():
+    docs = expenses_ref.stream()
+    count = 0
+
+    for doc in docs:
+        data = doc.to_dict()
+        base_expense = {
+            "date": data["date"],
+            "category": data["category"],
+            "amount": data["amount"],
+            "payment_method": data["payment_method"],
+            "place": data["place"],
+            "memo": data["memo"],
+        }
+        record = build_expense_rag_record(base_expense)
+        expenses_ref.document(doc.id).set(record)
+        count += 1
+
+    return {"message": f"{count}개 문서 임베딩 재생성 완료"}

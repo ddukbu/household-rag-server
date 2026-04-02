@@ -1,8 +1,9 @@
-import re
+import os
 import time
 from collections import defaultdict
 from typing import Any, Dict, List
 
+import numpy as np
 import requests
 
 from app.firebase_client import get_firestore_client
@@ -10,24 +11,19 @@ from app.firebase_client import get_firestore_client
 db = get_firestore_client()
 expenses_ref = db.collection("expenses")
 
-GEMINI_API_KEY = __import__("os").environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
 GENERATION_MODEL = "gemini-2.5-flash"
 GENERATE_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GENERATION_MODEL}:generateContent"
 )
 
-
-def load_expenses() -> List[Dict[str, Any]]:
-    docs = expenses_ref.stream()
-    expenses = []
-    for doc in docs:
-        data = doc.to_dict()
-        expenses.append({
-            "id": doc.id,
-            **data
-        })
-    return expenses
+EMBEDDING_MODEL = "gemini-embedding-001"
+EMBED_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{EMBEDDING_MODEL}:embedContent"
+)
 
 
 def expense_to_sentence(expense: Dict[str, Any]) -> str:
@@ -89,52 +85,102 @@ def build_monthly_summary(expenses: List[Dict[str, Any]]) -> List[Dict[str, str]
     return summaries
 
 
-def build_rag_documents(expenses: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    docs = []
+def call_embed_api(text: str) -> List[float]:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY,
+    }
+
+    payload = {
+        "content": {
+            "parts": [
+                {"text": text}
+            ]
+        }
+    }
+
+    response = requests.post(
+        EMBED_URL,
+        headers=headers,
+        json=payload,
+        timeout=120
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["embedding"]["values"]
+
+
+def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+    a = np.array(vec_a, dtype=np.float32)
+    b = np.array(vec_b, dtype=np.float32)
+
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom == 0:
+        return 0.0
+
+    return float(np.dot(a, b) / denom)
+
+
+def build_expense_rag_record(expense: Dict[str, Any]) -> Dict[str, Any]:
+    rag_text = expense_to_sentence(expense)
+    embedding = call_embed_api(rag_text)
+
+    return {
+        **expense,
+        "rag_text": rag_text,
+        "embedding": embedding
+    }
+
+
+def load_expenses() -> List[Dict[str, Any]]:
+    docs = expenses_ref.stream()
+    expenses = []
+    for doc in docs:
+        data = doc.to_dict()
+        expenses.append({
+            "id": doc.id,
+            **data
+        })
+    return expenses
+
+
+def retrieve_relevant_docs(question: str, expenses: List[Dict[str, Any]], top_k: int = 3) -> List[Dict[str, str]]:
+    query_embedding = call_embed_api(question)
+
+    scored_docs: List[Dict[str, Any]] = []
+
     for expense in expenses:
-        docs.append({
+        if "embedding" not in expense or "rag_text" not in expense:
+            continue
+
+        score = cosine_similarity(query_embedding, expense["embedding"])
+        scored_docs.append({
             "ref": f"expense:{expense['id']}",
-            "text": expense_to_sentence(expense)
+            "text": expense["rag_text"],
+            "score": score
         })
 
-    docs.extend(build_monthly_summary(expenses))
-    return docs
+    summaries = build_monthly_summary(expenses)
+    for summary in summaries:
+        summary_embedding = call_embed_api(summary["text"])
+        score = cosine_similarity(query_embedding, summary_embedding)
+        scored_docs.append({
+            "ref": summary["ref"],
+            "text": summary["text"],
+            "score": score
+        })
 
-
-def normalize_tokens(text: str) -> List[str]:
-    lowered = text.lower()
-    return re.findall(r"[가-힣a-zA-Z0-9]+", lowered)
-
-
-def extract_month_hint(question: str) -> str:
-    m = re.search(r"([1-9]|1[0-2])월", question)
-    if m:
-        month_num = int(m.group(1))
-        return f"-{month_num:02d}"
-    return ""
-
-
-def score_document(question: str, doc_text: str) -> int:
-    q_tokens = set(normalize_tokens(question))
-    d_tokens = set(normalize_tokens(doc_text))
-    score = len(q_tokens & d_tokens)
-
-    month_hint = extract_month_hint(question)
-    if month_hint and month_hint in doc_text:
-        score += 3
-
-    return score
-
-
-def retrieve_relevant_docs(question: str, expenses: List[Dict[str, Any]], top_k: int = 4) -> List[Dict[str, str]]:
-    docs = build_rag_documents(expenses)
-    scored = [(score_document(question, doc["text"]), doc) for doc in docs]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [doc for _, doc in scored[:top_k]]
+    scored_docs.sort(key=lambda x: x["score"], reverse=True)
+    return scored_docs[:top_k]
 
 
 def build_prompt(question: str, docs: List[Dict[str, str]]) -> str:
-    context = "\n\n".join([f"[{doc['ref']}]\n{doc['text']}" for doc in docs])
+    context = "\n\n".join(
+        [f"[{doc['ref']}]\n{doc['text']}" for doc in docs]
+    )
 
     return f"""
 너는 개인 가계부 소비 분석 도우미다.
@@ -205,7 +251,7 @@ def call_gemini(prompt: str) -> str:
 
 def answer_question(question: str) -> Dict[str, Any]:
     expenses = load_expenses()
-    docs = retrieve_relevant_docs(question, expenses, top_k=4)
+    docs = retrieve_relevant_docs(question, expenses, top_k=3)
     prompt = build_prompt(question, docs)
     answer = call_gemini(prompt)
 
