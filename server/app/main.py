@@ -100,16 +100,27 @@ def get_expenses(uid: str = Depends(verify_firebase_token)):
 
 @app.post("/expenses", response_model=Expense)
 def create_expense(expense_in: ExpenseIn, uid: str = Depends(verify_firebase_token)):
-    expenses_ref = db.collection("users").document(uid).collection("expenses")
-    doc_ref = expenses_ref.document()
+    print("POST /expenses called", flush=True)
+    print("uid =", uid, flush=True)
+    print("expense_in =", expense_in.model_dump(), flush=True)
 
-    record = build_expense_rag_record(expense_in.model_dump())
-    doc_ref.set(record)
+    try:
+        expenses_ref = db.collection("users").document(uid).collection("expenses")
+        doc_ref = expenses_ref.document()
 
-    return {
-        "id": doc_ref.id,
-        **expense_in.model_dump()
-    }
+        record = build_expense_rag_record(expense_in.model_dump())
+        print("record built successfully", flush=True)
+
+        doc_ref.set(record)
+        print("saved to firestore", flush=True)
+
+        return {
+            "id": doc_ref.id,
+            **expense_in.model_dump()
+        }
+    except Exception as e:
+        print("create_expense error =", str(e), flush=True)
+        raise
 
 
 @app.put("/expenses/{expense_id}", response_model=Expense)
