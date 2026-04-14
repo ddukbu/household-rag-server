@@ -9,7 +9,8 @@ import requests
 from app.firebase_client import get_firestore_client
 
 db = get_firestore_client()
-expenses_ref = db.collection("expenses")
+#expenses_ref = db.collection("expenses")
+#-> retrieve_relevant_docs 함수에서 uid에 맞는 expenses를 대신 호출
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
@@ -96,9 +97,7 @@ def call_embed_api(text: str) -> List[float]:
 
     payload = {
         "content": {
-            "parts": [
-                {"text": text}
-            ]
+            "parts": [{"text": text}]
         }
     }
 
@@ -135,8 +134,9 @@ def build_expense_rag_record(expense: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def load_expenses() -> List[Dict[str, Any]]:
-    docs = expenses_ref.stream()
+# 기존 load_expenses() 함수를 대체 -> 유저 id에 맞는 expenses 가져오기
+def get_user_expenses(uid: str) -> List[Dict[str, Any]]:
+    docs = db.collection("users").document(uid).collection("expenses").stream()
     expenses = []
     for doc in docs:
         data = doc.to_dict()
@@ -147,10 +147,11 @@ def load_expenses() -> List[Dict[str, Any]]:
     return expenses
 
 
-def retrieve_relevant_docs(question: str, expenses: List[Dict[str, Any]], top_k: int = 3) -> List[Dict[str, str]]:
+def retrieve_relevant_docs(uid: str, question: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    expenses = get_user_expenses(uid)
     query_embedding = call_embed_api(question)
 
-    scored_docs: List[Dict[str, Any]] = []
+    scored_docs = []
 
     for expense in expenses:
         if "embedding" not in expense or "rag_text" not in expense:
@@ -177,7 +178,7 @@ def retrieve_relevant_docs(question: str, expenses: List[Dict[str, Any]], top_k:
     return scored_docs[:top_k]
 
 
-def build_prompt(question: str, docs: List[Dict[str, str]]) -> str:
+def build_prompt(question: str, docs: List[Dict[str, Any]]) -> str:
     context = "\n\n".join(
         [f"[{doc['ref']}]\n{doc['text']}" for doc in docs]
     )
@@ -249,13 +250,24 @@ def call_gemini(prompt: str) -> str:
     return "응답을 생성하지 못했습니다."
 
 
-def answer_question(question: str) -> Dict[str, Any]:
-    expenses = load_expenses()
-    docs = retrieve_relevant_docs(question, expenses, top_k=3)
+#기존 answer_question 함수와 다르게 uid 매개변수 추가, 어쩌다 보니 시간을 측정해서 돌려주는 기능도 추가되었습니다!
+def answer_question(uid: str, question: str) -> Dict[str, Any]:
+    start = time.time()
+    docs = retrieve_relevant_docs(uid, question, top_k=3)
+    retrieval_elapsed = time.time() - start
+
     prompt = build_prompt(question, docs)
+
+    gen_start = time.time()
     answer = call_gemini(prompt)
+    generation_elapsed = time.time() - gen_start
+
+    total_elapsed = retrieval_elapsed + generation_elapsed
 
     return {
         "answer": answer,
-        "references": [doc["ref"] for doc in docs]
+        "references": [doc["ref"] for doc in docs],
+        "retrieval_seconds": round(retrieval_elapsed, 3),
+        "generation_seconds": round(generation_elapsed, 3),
+        "total_seconds": round(total_elapsed, 3),
     }

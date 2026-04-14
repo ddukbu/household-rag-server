@@ -4,3 +4,4 @@ pydantic
 requests
 firebase-admin
 numpy
+python-multipart
