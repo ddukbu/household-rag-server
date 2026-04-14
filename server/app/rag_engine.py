@@ -2,15 +2,19 @@ import os
 import time
 from collections import defaultdict
 from typing import Any, Dict, List
-
 import numpy as np
 import requests
-
+import json
 from app.firebase_client import get_firestore_client
+from datetime import datetime
 
+# db
 db = get_firestore_client()
 expenses_ref = db.collection("expenses")
+chat_history_ref = db.collection("chat_history")
+summaries_ref = db.collection("summaries")
 
+# api model
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 GENERATION_MODEL = "gemini-2.5-flash"
@@ -35,57 +39,20 @@ def expense_to_sentence(expense: Dict[str, Any]) -> str:
         f"메모: {expense['memo']}."
     )
 
+def build_expense_rag_record(expense: Dict[str, Any]) -> Dict[str, Any]:
+    rag_text = expense_to_sentence(expense)
+    embedding = call_embed_api(rag_text)
 
-def month_of(date_str: str) -> str:
-    return date_str[:7]
-
-
-def build_monthly_summary(expenses: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    grouped = defaultdict(list)
-    for expense in expenses:
-        grouped[month_of(expense["date"])].append(expense)
-
-    summaries = []
-    months = sorted(grouped.keys())
-    previous_total = None
-
-    for month in months:
-        items = grouped[month]
-        total = sum(int(x["amount"]) for x in items)
-
-        category_totals = defaultdict(int)
-        for x in items:
-            category_totals[x["category"]] += int(x["amount"])
-
-        top_category = max(category_totals.items(), key=lambda x: x[1])[0]
-        top_amount = category_totals[top_category]
-
-        if previous_total is None:
-            diff_text = "이전 달 데이터가 없어 증감 비교는 불가능하다."
-        else:
-            diff = total - previous_total
-            if diff > 0:
-                diff_text = f"전월 대비 총지출이 {diff}원 증가하였다."
-            elif diff < 0:
-                diff_text = f"전월 대비 총지출이 {abs(diff)}원 감소하였다."
-            else:
-                diff_text = "전월 대비 총지출 변화가 없다."
-
-        summaries.append({
-            "ref": f"summary:{month}",
-            "text": (
-                f"{month} 소비 요약이다. "
-                f"총지출은 {total}원이다. "
-                f"가장 큰 지출 카테고리는 {top_category}이며 해당 지출은 {top_amount}원이다. "
-                f"{diff_text}"
-            )
-        })
-        previous_total = total
-
-    return summaries
-
+    return {
+        **expense,
+        "embedding": embedding
+    }
 
 def call_embed_api(text: str) -> List[float]:
+    """
+    전달받은 텍스트(질문 또는 지출 내역)를 Gemini 모델에 보내 
+    의미적 특징이 담긴 숫자 리스트(임베딩)로 변환
+    """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
 
@@ -112,97 +79,11 @@ def call_embed_api(text: str) -> List[float]:
     data = response.json()
     return data["embedding"]["values"]
 
-
-def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
-    a = np.array(vec_a, dtype=np.float32)
-    b = np.array(vec_b, dtype=np.float32)
-
-    denom = np.linalg.norm(a) * np.linalg.norm(b)
-    if denom == 0:
-        return 0.0
-
-    return float(np.dot(a, b) / denom)
-
-
-def build_expense_rag_record(expense: Dict[str, Any]) -> Dict[str, Any]:
-    rag_text = expense_to_sentence(expense)
-    embedding = call_embed_api(rag_text)
-
-    return {
-        **expense,
-        "rag_text": rag_text,
-        "embedding": embedding
-    }
-
-
-def load_expenses() -> List[Dict[str, Any]]:
-    docs = expenses_ref.stream()
-    expenses = []
-    for doc in docs:
-        data = doc.to_dict()
-        expenses.append({
-            "id": doc.id,
-            **data
-        })
-    return expenses
-
-
-def retrieve_relevant_docs(question: str, expenses: List[Dict[str, Any]], top_k: int = 3) -> List[Dict[str, str]]:
-    query_embedding = call_embed_api(question)
-
-    scored_docs: List[Dict[str, Any]] = []
-
-    for expense in expenses:
-        if "embedding" not in expense or "rag_text" not in expense:
-            continue
-
-        score = cosine_similarity(query_embedding, expense["embedding"])
-        scored_docs.append({
-            "ref": f"expense:{expense['id']}",
-            "text": expense["rag_text"],
-            "score": score
-        })
-
-    summaries = build_monthly_summary(expenses)
-    for summary in summaries:
-        summary_embedding = call_embed_api(summary["text"])
-        score = cosine_similarity(query_embedding, summary_embedding)
-        scored_docs.append({
-            "ref": summary["ref"],
-            "text": summary["text"],
-            "score": score
-        })
-
-    scored_docs.sort(key=lambda x: x["score"], reverse=True)
-    return scored_docs[:top_k]
-
-
-def build_prompt(question: str, docs: List[Dict[str, str]]) -> str:
-    context = "\n\n".join(
-        [f"[{doc['ref']}]\n{doc['text']}" for doc in docs]
-    )
-
-    return f"""
-너는 개인 가계부 소비 분석 도우미다.
-반드시 아래 참고 문서만 근거로 답변해라.
-문서에 없는 내용은 추측하지 말고 "문서에서 확인되지 않습니다."라고 답해라.
-답변은 한국어로 작성하라.
-가능하면 날짜, 금액, 카테고리, 사용처를 구체적으로 언급하라.
-
-[질문]
-{question}
-
-[참고 문서]
-{context}
-
-[답변 형식]
-1. 먼저 질문에 직접 답변
-2. 필요한 경우 핵심 근거 요약
-3. 마지막에 "참고:" 아래에 사용한 ref 나열
-""".strip()
-
-
 def call_gemini(prompt: str) -> str:
+    """
+    작성된 프롬프트를 Gemini 모델에 전달하고 AI의 답변 반환
+    네트워크 오류 발생 시 최대 3번까지 재시도
+    """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
 
@@ -248,14 +129,439 @@ def call_gemini(prompt: str) -> str:
 
     return "응답을 생성하지 못했습니다."
 
+def load_expenses() -> List[Dict[str, Any]]:
+    """
+    Firestore의 'expenses' 컬렉션에 있는 모든 문서를 읽어와 
+    파이썬 딕셔너리 리스트 형태로 반환합니다.
+    """
+    # 'expenses' 컬렉션 내의 모든 문서를 스트림 형태로 로드
+    docs = expenses_ref.stream()
+    # 결과 데이터를 담을 빈 리스트 초기화
+    expenses = []
+    # 가져온 문서들을 하나씩 순회하며 처리
+    # 문서를 id를 추가한 딕셔너리로 변환하여 리스트에 추가
+    for doc in docs:
+        # 문서를 딕셔너리로 변환
+        data = doc.to_dict()
+        # id를 추가한 딕셔너리 리스트에 추가
+        expenses.append({
+            "id": doc.id,  # Firestore가 자동으로 생성한 문서 고유 ID
+            **data         
+        })
+    # 모든 문서가 담긴 리스트 반환
+    return expenses
+
+def load_chat_history() -> List[Dict[str, Any]]:
+    """
+    Firestore의 'chat_history' 컬렉션에 있는 모든 대화 기록을 읽어와 
+    파이썬 딕셔너리 리스트 형태로 반환합니다.
+    """
+    # 'chat_history' 컬렉션 내의 모든 문서를 스트림 형태로 로드
+    docs = chat_history_ref.stream()
+    # 결과 데이터를 담을 빈 리스트 초기화
+    chat_history = []
+    # 가져온 문서들을 하나씩 순회하며 처리
+    # 문서를 id를 추가한 딕셔너리로 변환하여 리스트에 추가
+    for doc in docs:
+        # 문서를 딕셔너리로 변환
+        data = doc.to_dict()
+        # id를 추가한 딕셔너리 리스트에 추가
+        chat_history.append({
+            "id": doc.id,
+            **data         
+        })
+        
+    return chat_history
+
+def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
+    """
+    전체 데이터 리스트에서 RAG 관련 필드(rag_text, embedding)를 제외하고
+    JSON 텍스트로 변환합니다.
+    """
+    clean_list = []
+    
+    for exp in expenses:
+        # 제외하고 싶은 필드 목록
+        exclude_keys = {"rag_text", "embedding"}
+        # 제외 필드를 제외한 나머지 데이터만 추출
+        clean_data = {k: v for k, v in exp.items() if k not in exclude_keys}
+        clean_list.append(clean_data)
+    
+    # 한글 깨짐 방지를 위해 ensure_ascii=False 설정
+    return json.dumps(clean_list, ensure_ascii=False, indent=4)
+    
+def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+    """
+    벡터 a와 b 사이의 각도 코사인 값을 계산하여 유사도를 측정합니다.
+    결과값은 1.0에 가까울수록 매우 유사하고, 0.0에 가까울수록 관련이 없음을 의미합니다.
+    """
+    a = np.array(vec_a, dtype=np.float32)
+    b = np.array(vec_b, dtype=np.float32)
+
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom == 0:
+        return 0.0
+
+    return float(np.dot(a, b) / denom)
+
+def retrieve_relevant_docs(
+        question: str, 
+        expenses: List[Dict[str, Any]], 
+        chat_histories: List[Dict[str, Any]], 
+        top_k: List[int] = [3, 1]
+        ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    사용자 질문과 가장 관련성이 높은 상위 k개의 문서를 반환
+    """
+    k_expense, k_history = top_k
+
+    # 사용자 질문 임베딩
+    query_embedding = call_embed_api(question)
+
+    # 1. 개별 항목에 대하여
+    # 유사도를 포함한 문서를 담을 리스트
+    scored_docs: List[Dict[str, Any]] = []
+    # 모든 문서의 유사도 계산
+    for expense in expenses:
+        # 검색을 위한 임베딩 데이터나 텍스트가 없는 경우 계산에서 제외
+        if "embedding" not in expense:
+            continue
+        # 유사도 계산
+        score = cosine_similarity(query_embedding, expense["embedding"])
+        
+        # 유사도를 추가한 문서 리스트에 추가
+        scored_docs.append({
+            **expense,     # date, amount, category, place, id 등이 모두 들어감
+            "score": score # 유사도 점수 추가
+        })
+    # 유사도를 기준으로 내림차순 정렬
+    scored_docs.sort(key=lambda x: x["score"], reverse=True)
+
+    # 2. 이전 대화 기록에 대하여
+    # 유사도를 포함한 문서를 담을 리스트
+    scored_history: List[Dict[str, Any]] = []
+    # 모든 문서의 유사도 계산
+    for chat_history in chat_histories:
+        # 검색을 위한 임베딩 데이터나 텍스트가 없는 경우 계산에서 제외
+        if "embedding" not in chat_history:
+            continue
+        # 유사도 계산
+        score = cosine_similarity(query_embedding, chat_history["embedding"])
+        
+        # 유사도를 추가한 문서 리스트에 추가
+        scored_history.append({
+            **chat_history,     # date, amount, category, place, id 등이 모두 들어감
+            "score": score # 유사도 점수 추가
+        })
+    # 유사도를 기준으로 내림차순 정렬
+    scored_history.sort(key=lambda x: x["score"], reverse=True)
+
+    
+    # 유사도가 높은 상위 top_k개의 문서 반환
+    return scored_docs[:k_expense], scored_history[:k_history]
+
+def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
+    """
+    전체 데이터 리스트에서 RAG 관련 필드(rag_text, embedding)를 제외하고
+    JSON 텍스트로 변환합니다.
+    """
+    clean_list = []
+    
+    for exp in expenses:
+        # 제외하고 싶은 필드 목록
+        exclude_keys = {"score", "embedding"}
+        # 제외 필드를 제외한 나머지 데이터만 추출
+        clean_data = {k: v for k, v in exp.items() if k not in exclude_keys}
+        clean_list.append(clean_data)
+    
+    # 한글 깨짐 방지를 위해 ensure_ascii=False 설정
+    return json.dumps(clean_list, ensure_ascii=False, indent=4)
+
+def build_prompt(question: str, docs: List[Dict[str, Any]], histories: List[Dict[str, Any]]) -> str:
+    """
+    데이터를 바탕으로 LLM에게 보낼 최종 프롬프트를 생성하여 반환
+    """
+    
+    # 검색된 문서 리스트를 JSON 문자열로 변환
+    context = get_expenses_json(docs)
+    history = get_expenses_json(histories)
+
+    # [STEP 2] LLM에게 전달할 시스템 프롬프트 및 컨텍스트 구성
+    return f"""
+너는 개인 가계부 소비 분석 도우미다.
+반드시 아래 참고 문서, 이전 대화 내역만 근거로 답변해라.
+문서에 없는 내용은 추측하지 말고 "문서에서 확인되지 않습니다."라고 답해라.
+답변은 한국어로 작성하라.
+가능하면 날짜, 금액, 카테고리, 사용처를 구체적으로 언급하라.
+
+[질문]
+{question}
+
+[참고 문서]
+{context}
+
+[이전 대화 내역]
+{history}
+
+[답변 형식]
+1. 먼저 질문에 직접 답변
+2. 필요한 경우 핵심 근거 요약
+3. 마지막에 "참고:" 아래에 사용한 id 나열
+""".strip() # 앞뒤 불필요한 공백을 제거
+
+def save_chat_history(question: str, answer: str):
+    """
+    질문, 답변, 그리고 '대화 시점'을 하나의 문장으로 묶어 임베딩합니다.
+    """
+    # 대화 시점 계산
+    now = datetime.now()
+    time_str = now.strftime('%Y년 %m월 %d일 %H시 %M분')
+    
+    # 검색을 위해 대화 시점과 질문, 답변을 합친 텍스트를 임베딩
+    context_text = f"대화 시점: {time_str}\n질문: {question}\n답변: {answer}"
+    embedding = call_embed_api(context_text)
+    
+    # Firestore 저장
+    chat_history_ref.add({
+        "user_query": question,
+        "ai_response": answer,
+        "embedding": embedding,
+        "timestamp": time.time()
+    })
 
 def answer_question(question: str) -> Dict[str, Any]:
+    # 데이터 로드
     expenses = load_expenses()
-    docs = retrieve_relevant_docs(question, expenses, top_k=3)
-    prompt = build_prompt(question, docs)
+    # 대화 내역 로드
+    chat_history = load_chat_history()
+    # 데이터 추출
+    docs, histories = retrieve_relevant_docs(question, expenses, chat_history, top_k=[3, 1])
+    # 프롬프트 생성
+    prompt = build_prompt(question, docs, histories)
+    # api 호출
     answer = call_gemini(prompt)
-
+    # 대화 내용 저장
+    save_chat_history(question, answer)
+    # 답변 반환
     return {
         "answer": answer,
-        "references": [doc["ref"] for doc in docs]
+        "references": [doc["id"] for doc in docs]
+    }
+
+"""
+요약본 데이터 구조 { date-embeding data: , 식비: , 학업:, ..., 현금: , 카드: ,...}
+
+문서를 추출할 때 date-embeding data와 질문 임베딩 데이터의 유사도 비교하여 임계치 유사도를 넘는 경우만 뽑음(질문에 해당하는 월의 요약본 추출)
+
+이 때 최소 문서수와 최대 문서수 지정
+
+개별 항목과 이전 대화 내역에도 임계치 유사도와 최소 문서수와 최대 문서수 지정
+
+프롬프트 생성하여 전달하고 답변 제공 받기 
+
+문제 -> 임베딩 모델은 텍스트 사이의 연관성을 수치로 나타낸 것으로 논리적 연산은 하지 못함 그래서 지난달과 같은 단어 매칭x
+    => LLM을 사용하여 날짜와 관련된 텍스트 바로 뒤에 (YYYY-MM or YYYY-MM-DD)을 붙여달라고 해서 질문을 재정의 후 위의 방법 사용
+
+아래 함수들 개발 중...
+"""
+from pydantic import BaseModel
+from typing import Dict
+
+# [Model] 월별 지출 통계 구조
+class MonthlySummary(BaseModel):
+    year_month: str
+    category_totals: Dict[str, int] = {}
+    payment_method_totals: Dict[str, int] = {}
+    embedding: str = ""
+
+class ExpenseIn(BaseModel):
+    date: str
+    category: str
+    amount: int
+    payment_method: str
+    place: str
+    memo: str
+    
+def update_monthly_summary(summary: MonthlySummary, expense: ExpenseIn, mode: str = "add"):
+    """
+    [Logic] 지출 변동분을 요약본에 반영 (일반 함수)
+    """
+    multiplier = 1 if mode == "add" else -1
+    change = expense.amount * multiplier
+
+    # 카테고리 업데이트
+    cat = expense.category
+    summary.category_totals[cat] = summary.category_totals.get(cat, 0) + change
+
+    # 결제 수단 업데이트
+    pay = expense.payment_method
+    summary.payment_method_totals[pay] = summary.payment_method_totals.get(pay, 0) + change
+    
+    # 0원 항목 정리
+    if summary.category_totals.get(cat) == 0:
+        del summary.category_totals[cat]
+    
+    return summary
+
+def process_expense_change(expense: ExpenseIn, mode: str = "add"):
+    """
+    [Service] DB 요약본 업데이트 처리 (일반 함수)
+    """
+    year_month = expense.date[:7]  
+    summary_data = db.summaries.find_one({"year_month": year_month})
+    
+    if summary_data:
+        summary = MonthlySummary(**summary_data)
+    else:
+        # 생성 시점에만 검색용 텍스트를 딱 한 번 생성
+        summary = MonthlySummary(
+            year_month=year_month,
+            date_embedding_data=f"{year_month} 지출 요약 및 통계 내역"
+        )
+
+    # 2. 요약본 수치 업데이트
+    updated_summary = update_monthly_summary(summary, expense, mode)
+
+    # 3. DB에 저장 (Update or Insert)
+    db.summaries.update_one(
+        {"year_month": year_month},
+        {"$set": updated_summary.dict()},
+        upsert=True
+    )
+
+def load_monthly_summaries() -> List[Dict[str, Any]]:
+    """
+    Firestore의 'summaries' 컬렉션에서 모든 월별 요약본을 로드합니다.
+    """
+    # 'summaries' 컬렉션 내의 모든 문서를 스트림 형태로 로드
+    docs = summaries_ref.stream()
+    # 결과 데이터를 담을 빈 리스트 초기화
+    summaries = []
+    # 가져온 문서들을 하나씩 순회하며 처리
+    # 문서를 id를 추가한 딕셔너리로 변환하여 리스트에 추가
+    for doc in docs:
+        # 문서를 딕셔너리로 변환
+        data = doc.to_dict()
+        # id를 추가한 딕셔너리 리스트에 추가
+        summaries.append({
+            "id": doc.id,   # Firestore가 자동으로 생성한 문서 고유 ID
+            **data
+        })
+    return summaries
+
+def retrieve_relevant_docs(
+        question: str, 
+        summaries: List[Dict[str, Any]],
+        expenses: List[Dict[str, Any]], 
+        chat_histories: List[Dict[str, Any]], 
+        ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    사용자 질문과 가장 관련성이 높은 상위 k개의 문서를 반환
+    """
+
+    # 사용자 질문 임베딩
+    query_embedding = call_embed_api(question)
+
+    def filter_docs(
+            docs: List[Dict[str, Any]], 
+            threshold: float, 
+            min_k: int, 
+            max_k: int
+            )-> List[Dict[str, Any]]:
+        # 유사도를 포함한 문서를 담을 리스트
+        scored: List[Dict[str, Any]] = []
+        # 모든 문서의 유사도 계산
+        for doc in docs:
+            # 검색을 위한 임베딩 데이터가 없는 경우 계산에서 제외
+            if "embedding" not in doc or not doc["embedding"]: 
+                continue
+            # 유사도 계산
+            score = cosine_similarity(query_embedding, doc["embedding"])
+            # 유사도를 추가한 문서 리스트에 추가
+            scored.append({
+                **doc, 
+                "score": score
+            })
+        # 유사도 순 정렬
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        
+        # 임계치를 넘는 문서들 필터링
+        passed = [d for d in scored if d["score"] >= threshold]
+        
+        # 최소 개수(min_k) 보장: 임계치 못 넘어도 상위권은 가져옴
+        if len(passed) < min_k:
+            passed = scored[:min_k]
+        
+        # 최대 개수(max_k) 제한
+        return passed[:max_k]
+
+    # 요약본: 날짜 매칭이 중요하므로 임계치를 높게 잡되, 최소 1개는 보장
+    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=1, max_k=3)
+    
+    # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
+    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=0, max_k=15)
+    
+    # 대화 내역: 문맥 파악용으로 최대 3개
+    relevant_histories = filter_docs(chat_histories, threshold=0.75, min_k=0, max_k=3)
+
+    return relevant_summaries, relevant_expenses, relevant_histories
+
+def build_prompt(
+        question: str, 
+        summaries: List[Dict[str, Any]], 
+        docs: List[Dict[str, Any]], 
+        histories: List[Dict[str, Any]]
+        ) -> str:
+    """
+    데이터를 바탕으로 LLM에게 보낼 최종 프롬프트를 생성하여 반환
+    """
+    
+    # 검색된 문서 리스트를 JSON 문자열로 변환
+    summary_context = get_expenses_json(summaries)
+    expense_context = get_expenses_json(docs)
+    history_context = get_expenses_json(histories)
+
+    # [STEP 2] LLM에게 전달할 시스템 프롬프트 및 컨텍스트 구성
+    return f"""
+너는 개인 가계부 소비 분석 도우미다.
+제공된 [월별 요약]을 통해 전체적인 흐름을 파악하고, [상세 지출 내역]을 참고하여 답변해라.
+반드시 아래 참고 데이터만 근거로 답변하고, 없는 내용은 "확인되지 않습니다"라고 답해라.
+
+[질문]
+{question}
+
+[월별 요약 통계]
+{summary_context}
+
+[상세 지출 내역]
+{expense_context}
+
+[이전 대화 내역]
+{history_context}
+
+[답변 가이드]
+1. 질문한 달의 전체 지출 현황(카테고리/결제방식 별)을 요약본을 근거로 먼저 설명해줘.
+2. 구체적인 내역을 물었다면 상세 지출 내역의 장소와 금액을 언급해줘.
+3. 한국어로 구체적이고 친절하게 답변해라.
+""".strip()
+
+def answer_question(question: str) -> Dict[str, Any]:
+    # 월별 요약본 로드
+    summaries = load_monthly_summaries()
+    # 데이터 로드
+    expenses = load_expenses()
+    # 대화 내역 로드
+    chat_histories = load_chat_history()
+    # 데이터 추출
+    docs, histories = retrieve_relevant_docs(question, summaries, expenses, chat_histories)
+    # 프롬프트 생성
+    prompt = build_prompt(question, summaries, docs, histories)
+    # api 호출
+    answer = call_gemini(prompt)
+    # 대화 내용 저장
+    save_chat_history(question, answer)
+    # 답변 반환
+    return {
+        "answer": answer,
+        "references": [doc["id"] for doc in docs]
     }

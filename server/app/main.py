@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.firebase_client import get_firestore_client
-from app.rag_engine import answer_question, build_expense_rag_record
+from app.rag_engine import answer_question, build_expense_rag_record, ExpenseIn
 
 app = FastAPI(title="HouseHold RAG API")
 
@@ -19,15 +19,6 @@ app.add_middleware(
 
 db = get_firestore_client()
 expenses_ref = db.collection("expenses")
-
-
-class ExpenseIn(BaseModel):
-    date: str
-    category: str
-    amount: int
-    payment_method: str
-    place: str
-    memo: str
 
 
 class Expense(ExpenseIn):
