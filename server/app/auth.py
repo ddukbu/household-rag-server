@@ -1,21 +1,20 @@
-from fastapi import Header, HTTPException
+from fastapi import HTTPException, Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from firebase_admin import auth as firebase_auth
 
+security = HTTPBearer()
 
-def verify_firebase_token(authorization: str | None = Header(default=None)) -> str:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization 헤더가 없습니다.")
 
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Bearer 토큰 형식이 아닙니다.")
+def verify_firebase_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> str:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authorization 정보가 없습니다.")
 
-    id_token = authorization.split(" ", 1)[1].strip()
-    if not id_token:
-        raise HTTPException(status_code=401, detail="토큰이 비어 있습니다.")
+    id_token = credentials.credentials
 
     try:
         decoded_token = firebase_auth.verify_id_token(id_token)
-        uid = decoded_token["uid"]
-        return uid
+        return decoded_token["uid"]
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"유효하지 않은 Firebase 토큰입니다: {str(e)}")
