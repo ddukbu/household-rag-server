@@ -120,9 +120,7 @@ def call_embed_api(text: str) -> List[float]:
 
     payload = {
         "content": {
-            "parts": [
-                {"text": text}
-            ]
+            "parts": [{"text": text}]
         }
     }
 

@@ -33,9 +33,13 @@ class AskRequest(BaseModel):
     question: str
 
 
+#응답 클래스에 측정 시간 멤버변수 추가
 class AskResponse(BaseModel):
     answer: str
     references: List[str]
+    retrieval_seconds: float
+    generation_seconds: float
+    total_seconds: float
 
 #응답 클래스에 측정 시간 멤버변수 추가
 class AskResponse(BaseModel):
@@ -66,6 +70,20 @@ def init_profile(profile: SignUpProfile, uid: str = Depends(verify_firebase_toke
         })
 
     return {"message": "profile initialized", "uid": uid}
+
+#로그인한 사용자의 기본 사용자 문서를 Firestore에 만들어주는 함수, 사용자별 데이터 공간을 준비하는 초기화 API
+@app.post("/profile/init")
+def init_profile(profile: SignUpProfile, uid: str = Depends(verify_firebase_token)):
+    user_ref = db.collection("users").document(uid)
+
+    if not user_ref.get().exists:
+        user_ref.set({
+            "email": profile.email,
+            "created_at": datetime.utcnow().isoformat()
+        })
+
+    return {"message": "profile initialized", "uid": uid}
+
 
 @app.get("/expenses", response_model=List[Expense])
 def get_expenses(uid: str = Depends(verify_firebase_token)):
