@@ -360,10 +360,10 @@ def retrieve_relevant_docs(
         return passed[:max_k]
 
     # 요약본: 날짜 매칭이 중요하므로 임계치를 높게 잡되, 최소 1개는 보장
-    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=1, max_k=3)
+    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=0, max_k=3)
     
     # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
-    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=0, max_k=15)
+    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=0, max_k=30)
     
     # 대화 내역: 문맥 파악용으로 최대 3개
     relevant_histories = filter_docs(chat_histories, threshold=0.75, min_k=0, max_k=3)
