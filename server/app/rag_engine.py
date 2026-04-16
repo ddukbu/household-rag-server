@@ -144,6 +144,7 @@ def call_gemini(prompt: str) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
 
+    time.sleep(3.0)
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY,
