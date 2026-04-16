@@ -441,16 +441,28 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     expenses = load_expenses(uid)
     # 대화 내역 로드
     chat_histories = load_chat_history(uid)
+    # 시간 측정
+    start = time.time()
     # 데이터 추출
     summaries, docs, histories = retrieve_relevant_docs(transformed_query, summaries, expenses, chat_histories)
+    # 시간측정
+    retrieval_elapsed = time.time() - start
     # 프롬프트 생성
     prompt = build_prompt(question, summaries, docs, histories)
+    # 시간 측정
+    gen_start = time.time()
     # api 호출
     answer = call_gemini(prompt)
+    # 시간 측정
+    generation_elapsed = time.time() - gen_start
+    total_elapsed = retrieval_elapsed + generation_elapsed
     # 대화 내용 저장
     save_chat_history(uid, question, answer)
     # 답변 반환
     return {
         "answer": answer,
-        "references": [doc["id"] for doc in docs]
+        "references": [doc["id"] for doc in docs],
+        "retrieval_seconds": round(retrieval_elapsed, 3),
+        "generation_seconds": round(generation_elapsed, 3),
+        "total_seconds": round(total_elapsed, 3),
     }

@@ -103,7 +103,7 @@ def create_expense(expense_in: ExpenseIn, uid: str = Depends(verify_firebase_tok
         print("saved to firestore", flush=True)
 
         # [수정] 요약본 업데이트 호출
-        process_expense_change(expense_in, mode="add")
+        process_expense_change(uid, expense_in, mode="add")
 
         return {
             "id": doc_ref.id,
@@ -124,14 +124,14 @@ def update_expense(expense_id: str, expense_in: ExpenseIn, uid: str = Depends(ve
     # 기존 데이터 차감
     old_data = doc_ref.get().to_dict()
     old_expense = ExpenseIn(**{k: v for k, v in old_data.items() if k in ExpenseIn.__fields__})
-    process_expense_change(old_expense, mode="delete")
+    process_expense_change(uid, old_expense, mode="delete")
 
     record = build_expense_rag_record(expense_in.model_dump())
     doc_ref.set(record)
 
     # [수정] 요약본 업데이트 호출(로직: 기존 값 차감 -> 새 값 반영)
     # 새로운 데이터 요약본에 합산
-    process_expense_change(expense_in, mode="add")
+    process_expense_change(uid, expense_in, mode="add")
     
     return {
         "id": expense_id,
@@ -149,7 +149,7 @@ def delete_expense(expense_id: str, uid: str = Depends(verify_firebase_token)):
     expense_data = doc_ref.get().to_dict()
     # Pydantic 모델로 변환 (필요한 필드만 추출)
     expense_in = ExpenseIn(**{k: v for k, v in expense_data.items() if k in ExpenseIn.__fields__})
-    process_expense_change(expense_in, mode="delete")
+    process_expense_change(uid, expense_in, mode="delete")
 
     doc_ref.delete()
     return {"message": "deleted"}
