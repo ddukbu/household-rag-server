@@ -198,9 +198,6 @@ def transform_query(question: str) -> str:
 변환된 질문:"""
     transformed = call_gemini(prompt)
 
-    # 로그 출력
-    print("변환된 질문 " + transformed)
-
     return transformed if transformed else question
 
 def load_monthly_summaries(uid: str) -> List[Dict[str, Any]]:
@@ -244,12 +241,6 @@ def load_expenses(uid: str) -> List[Dict[str, Any]]:
             **data         
         })
     # 모든 문서가 담긴 리스트 반환
-
-    # 로그 출력
-    print("개별 항목 불러오기")
-    for expense in expenses:
-        print(f"{expense["date"]}, {expense["category"]}, {expense["amount"]}, {expense["payment_method"]}, {expense["place"]}, {expense["memo"]}")
-
     return expenses
 
 def load_chat_history(uid: str) -> List[Dict[str, Any]]:
@@ -271,12 +262,6 @@ def load_chat_history(uid: str) -> List[Dict[str, Any]]:
             "id": doc.id,
             **data         
         })
-
-    # 로그 출력
-    print("이전 대화 내역 불러오기")
-    for chat_history_item in chat_history:
-        print(chat_history_item)
-        
     return chat_history
 
 def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
@@ -294,7 +279,8 @@ def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
         clean_list.append(clean_data)
 
     # 로그 출력
-    print(json.dumps(clean_list, ensure_ascii=False, indent=4) + " json 형태의 텍스트 생성")
+    print("json 형태의 텍스트 생성")
+    print(json.dumps(clean_list, ensure_ascii=False, indent=4))
     
     # 한글 깨짐 방지를 위해 ensure_ascii=False 설정
     return json.dumps(clean_list, ensure_ascii=False, indent=4)
@@ -446,27 +432,30 @@ def save_chat_history(uid: str, question: str, answer: str):
         "context_text": context_text,
         "embedding": embedding,
     })
-    
-    # 로그 출력
-    print(context_text + " 대화 내용 저장")
 
 def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
     transformed_query = transform_query(question)
+    # 로그 출력
+    print("변환된 질문: " + transformed_query)
+
     # 월별 요약본 로드
     summaries = load_monthly_summaries(uid)
     # 데이터 로드
     expenses = load_expenses(uid)
     # 대화 내역 로드
     chat_histories = load_chat_history(uid)
+
     # 시간 측정
     start = time.time()
     # 데이터 추출
     summaries, docs, histories = retrieve_relevant_docs(transformed_query, summaries, expenses, chat_histories)
     # 시간측정
     retrieval_elapsed = time.time() - start
+
     # 프롬프트 생성
     prompt = build_prompt(question, summaries, docs, histories)
+
     # 시간 측정
     gen_start = time.time()
     # api 호출
@@ -474,8 +463,13 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 시간 측정
     generation_elapsed = time.time() - gen_start
     total_elapsed = retrieval_elapsed + generation_elapsed
+    # 로그 출력
+    print("답변")
+    print(answer)
+
     # 대화 내용 저장
     save_chat_history(uid, question, answer)
+
     # 답변 반환
     return {
         "answer": answer,
