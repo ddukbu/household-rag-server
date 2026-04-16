@@ -394,10 +394,8 @@ def build_prompt(
 [질문]
 {question}
 
-[월별 요약 통계]
+[참고 내역]
 {summary_context}
-
-[상세 지출 내역]
 {expense_context}
 
 [이전 대화 내역]
