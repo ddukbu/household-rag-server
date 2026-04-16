@@ -279,7 +279,7 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     retrieval_elapsed = time.time() - start
     
     chat_history = get_recent_chats(uid, limit=3)
-    prompt = build_prompt(question, docs)
+    prompt = build_prompt(question, docs, chat_history)
 
     gen_start = time.time()
     answer = call_gemini(prompt)
