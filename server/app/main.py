@@ -152,4 +152,22 @@ def delete_expense(expense_id: str, uid: str = Depends(verify_firebase_token)):
 
 @app.post("/ask", response_model=AskResponse)
 def ask_api(request: AskRequest, uid: str = Depends(verify_firebase_token)):
-    return answer_question(uid, request.question)
+    # 1. RAG 엔진을 통해 질문에 대한 답변과 측정 시간을 받아옵니다.
+    result = answer_question(uid, request.question)
+    
+    # 2. 유저간 데이터 분리를 위해 users -> [내 UID] -> chat_sessions 경로를 지정합니다.
+    chat_ref = db.collection("users").document(uid).collection("chat_sessions")
+    
+    # 3. Firestore에 저장할 채팅 데이터 딕셔너리를 만듭니다.
+    chat_data = {
+        "question": request.question,
+        "answer": result["answer"],
+        "timestamp": datetime.utcnow().isoformat(),
+        "references": result.get("references", [])
+    }
+    
+    # 4. 해당 유저의 chat_sessions 컬렉션에 문서를 추가합니다.
+    chat_ref.add(chat_data)
+    
+    # 5. 기존처럼 클라이언트(Swagger UI)에게 결과를 반환합니다.
+    return result
