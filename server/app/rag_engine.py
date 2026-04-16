@@ -1,5 +1,7 @@
 import os
 import time
+from datetime import datetime, timedelta # 이 줄을 추가하세요!
+from collections import defaultdict
 from collections import defaultdict
 from typing import Any, Dict, List
 
@@ -177,18 +179,23 @@ def retrieve_relevant_docs(uid: str, question: str, top_k: int = 3) -> List[Dict
     scored_docs.sort(key=lambda x: x["score"], reverse=True)
     return scored_docs[:top_k]
 
-
-def build_prompt(question: str, docs: List[Dict[str, Any]]) -> str:
+# chat history변수 추가 및 한국시간 기준 설정
+def build_prompt(question: str, docs: List[Dict[str, Any]], chat_history: str) -> str:
     context = "\n\n".join(
         [f"[{doc['ref']}]\n{doc['text']}" for doc in docs]
     )
-
+    #한국시간 기준
+    kst_now = datetime.utcnow() + timedelta(hours=9)
+    today_date = kst_now.strftime("%Y-%m-%d")
     return f"""
 너는 개인 가계부 소비 분석 도우미다.
 반드시 아래 참고 문서만 근거로 답변해라.
 문서에 없는 내용은 추측하지 말고 "문서에서 확인되지 않습니다."라고 답해라.
 답변은 한국어로 작성하라.
 가능하면 날짜, 금액, 카테고리, 사용처를 구체적으로 언급하라.
+
+[최근 대화 기록]
+{chat_history if chat_history else "이전 대화 없음"}
 
 [질문]
 {question}
@@ -248,6 +255,21 @@ def call_gemini(prompt: str) -> str:
         response.raise_for_status()
 
     return "응답을 생성하지 못했습니다."
+#최근 대화 3턴 가져오는 함수
+def get_recent_chats(uid: str, limit: int = 3) -> str:
+    docs = db.collection("users").document(uid).collection("chat_sessions").stream()
+    chats = []
+    for doc in docs:
+        chats.append(doc.to_dict())
+    
+    chats.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    recent_chats = chats[:limit]
+    
+    history_text = []
+    for chat in reversed(recent_chats):
+        history_text.append(f"사용자: {chat.get('question')}\nAI: {chat.get('answer')}")
+        
+    return "\n\n".join(history_text)
 
 
 #기존 answer_question 함수와 다르게 uid 매개변수 추가, 어쩌다 보니 시간을 측정해서 돌려주는 기능도 추가되었습니다!
@@ -255,7 +277,8 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     start = time.time()
     docs = retrieve_relevant_docs(uid, question, top_k=3)
     retrieval_elapsed = time.time() - start
-
+    
+    chat_history = get_recent_chats(uid, limit=3)
     prompt = build_prompt(question, docs)
 
     gen_start = time.time()
