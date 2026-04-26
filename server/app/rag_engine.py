@@ -142,7 +142,6 @@ def call_gemini(prompt: str) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
 
-    time.sleep(3.0)
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY,
@@ -436,6 +435,7 @@ def save_chat_history(uid: str, question: str, answer: str):
 def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
     transformed_query = transform_query(question)
+    time.sleep(1.0)
     # 로그 출력
     print("변환된 질문: " + transformed_query)
 
