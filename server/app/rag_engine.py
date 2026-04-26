@@ -142,7 +142,6 @@ def call_gemini(prompt: str) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
 
-    time.sleep(3.0)
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY,
@@ -198,9 +197,6 @@ def transform_query(question: str) -> str:
 변환된 질문:"""
     transformed = call_gemini(prompt)
 
-    # 로그 출력
-    print("변환된 질문 " + transformed)
-
     return transformed if transformed else question
 
 def load_monthly_summaries(uid: str) -> List[Dict[str, Any]]:
@@ -244,12 +240,6 @@ def load_expenses(uid: str) -> List[Dict[str, Any]]:
             **data         
         })
     # 모든 문서가 담긴 리스트 반환
-
-    # 로그 출력
-    print("개별 항목 불러오기")
-    for expense in expenses:
-        print(f"{expense["date"]}, {expense["category"]}, {expense["amount"]}, {expense["payment_method"]}, {expense["place"]}, {expense["memo"]}")
-
     return expenses
 
 def load_chat_history(uid: str) -> List[Dict[str, Any]]:
@@ -271,12 +261,6 @@ def load_chat_history(uid: str) -> List[Dict[str, Any]]:
             "id": doc.id,
             **data         
         })
-
-    # 로그 출력
-    print("이전 대화 내역 불러오기")
-    for chat_history_item in chat_history:
-        print(chat_history_item)
-        
     return chat_history
 
 def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
@@ -294,7 +278,8 @@ def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
         clean_list.append(clean_data)
 
     # 로그 출력
-    print(json.dumps(clean_list, ensure_ascii=False, indent=4) + " json 형태의 텍스트 생성")
+    print("json 형태의 텍스트 생성")
+    print(json.dumps(clean_list, ensure_ascii=False, indent=4))
     
     # 한글 깨짐 방지를 위해 ensure_ascii=False 설정
     return json.dumps(clean_list, ensure_ascii=False, indent=4)
@@ -360,10 +345,10 @@ def retrieve_relevant_docs(
         return passed[:max_k]
 
     # 요약본: 날짜 매칭이 중요하므로 임계치를 높게 잡되, 최소 1개는 보장
-    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=1, max_k=3)
+    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=0, max_k=3)
     
     # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
-    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=0, max_k=15)
+    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=0, max_k=30)
     
     # 대화 내역: 문맥 파악용으로 최대 3개
     relevant_histories = filter_docs(chat_histories, threshold=0.75, min_k=0, max_k=3)
@@ -386,7 +371,8 @@ def build_prompt(
     history_context = get_expenses_json(histories)
 
     # LLM에게 전달할 시스템 프롬프트 및 컨텍스트 구성
-    return f"""
+    #return f"""
+    """
 너는 개인 가계부 소비 분석 도우미다.
 제공된 [월별 요약]을 통해 전체적인 흐름을 파악하고, [상세 지출 내역]을 참고하여 답변해라.
 반드시 아래 참고 데이터만 근거로 답변하고, 없는 내용은 "확인되지 않습니다"라고 답해라.
@@ -394,10 +380,8 @@ def build_prompt(
 [질문]
 {question}
 
-[월별 요약 통계]
+[참고 내역]
 {summary_context}
-
-[상세 지출 내역]
 {expense_context}
 
 [이전 대화 내역]
@@ -407,6 +391,26 @@ def build_prompt(
 1. 질문한 달의 전체 지출 현황(카테고리/결제방식 별)을 요약본을 근거로 먼저 설명해줘.
 2. 구체적인 내역을 물었다면 상세 지출 내역의 장소와 금액을 언급해줘.
 3. 한국어로 구체적이고 친절하게 답변해라.
+"""
+#""".strip()
+    return f"""
+너는 사용자의 자산 관리를 돕는 [스마트 가계부 분석가]이다. 아래 지침에 따라 답변해라.
+
+### [데이터 활용 가이드]
+1. **통계의 출처:** - 카테고리/결제 수단 총액은 **[월별 요약]**을 최우선 근거로 답변해라.
+   - 요약본에 없는 구체적인 통계(예: 특정 식당 방문 횟수, 특정 시간대 지출 등)는 **[상세 지출 내역]**을 바탕으로 직접 계산하되, "검색된 내역을 바탕으로 확인한 결과~"와 같은 표현을 사용하여 데이터가 일부일 수 있음을 암시해라.
+2. **상세 내역의 유연성:** 상세 내역을 단순히 나열하지 말고, 질문의 맥락에 맞게 분석하여 답변에 녹여내라. (예: "주로 점심시간에 편의점 지출이 많으시네요")
+3. **인사이트 제공 (중요):** 데이터 분석 후에는 반드시 사용자의 소비 습관에 도움이 될 만한 **팁이나 조언**을 한 문장 이상 포함해라.
+
+### [참고 데이터]
+* [월별 요약]: {summary_context}
+* [상세 지출 내역]: {expense_context}
+* [이전 대화]: {history_context}
+
+### [질문]
+"{question}"
+
+답변 (핵심 위주로 친절하게):
 """.strip()
 
 def save_chat_history(uid: str, question: str, answer: str):
@@ -427,27 +431,31 @@ def save_chat_history(uid: str, question: str, answer: str):
         "context_text": context_text,
         "embedding": embedding,
     })
-    
-    # 로그 출력
-    print(context_text + " 대화 내용 저장")
 
 def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
     transformed_query = transform_query(question)
+    time.sleep(1.0)
+    # 로그 출력
+    print("변환된 질문: " + transformed_query)
+
     # 월별 요약본 로드
     summaries = load_monthly_summaries(uid)
     # 데이터 로드
     expenses = load_expenses(uid)
     # 대화 내역 로드
     chat_histories = load_chat_history(uid)
+
     # 시간 측정
     start = time.time()
     # 데이터 추출
     summaries, docs, histories = retrieve_relevant_docs(transformed_query, summaries, expenses, chat_histories)
     # 시간측정
     retrieval_elapsed = time.time() - start
+
     # 프롬프트 생성
     prompt = build_prompt(question, summaries, docs, histories)
+
     # 시간 측정
     gen_start = time.time()
     # api 호출
@@ -455,8 +463,13 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 시간 측정
     generation_elapsed = time.time() - gen_start
     total_elapsed = retrieval_elapsed + generation_elapsed
+    # 로그 출력
+    print("답변")
+    print(answer)
+
     # 대화 내용 저장
     save_chat_history(uid, question, answer)
+
     # 답변 반환
     return {
         "answer": answer,
