@@ -1,7 +1,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Union, Dict, Any, List
 import numpy as np
 import requests
 import json
@@ -29,80 +29,146 @@ EMBED_URL = (
     f"{EMBEDDING_MODEL}:embedContent"
 )
 
-# [Model] 월별 지출 통계 구조
-class MonthlySummary(BaseModel):
+class SummaryIn(BaseModel):
     year_month: str
-    category_totals: Dict[str, int] = {}
-    payment_method_totals: Dict[str, int] = {}
     embedding: List[float] = []
+    # 통계
+    total_income: int = 0                           # 총소득
+    total_expense: int = 0                          # 총지출
+    # 수익 섹션
+    fixed_income_details: Dict[str, int] = {}       # 고정 수입
+    variable_income_details: Dict[str, int] = {}    # 변동 수입
+    # 지출 섹션
+    fixed_expense_details: Dict[str, int] = {}      # 고정 지출
+    variable_expense_details: Dict[str, int] = {}   # 변동 지출
+    # 예산 설정 섹션
+    total_budget: int = 0                           # 가용 예산 (고정 수익 - 고정 지출 - 저축)
+    saving: int = 0                                 # 저축
+    budget_details: Dict[str, int] = {}             # 카테고리별 예산 설정
+
 
 class ExpenseIn(BaseModel):
-    date: str
-    category: str
-    amount: int
-    payment_method: str
-    place: str
-    memo: str
+    date: str               # 날짜
+    time: str               # 시간
+    is_fixed_expense: bool  # 고정지출 여부
+    category: str           # 카테고리
+    amount: int             # 금액
+    payment_method: str     # 결제방법
+    place: str              # 사용처
+    memo: str               # 메모
 
-def expense_to_sentence(expense: Dict[str, Any]) -> str:
-    return (
-        f"{expense['date']}에 {expense['category']} 카테고리로 "
-        f"{expense['amount']}원을 지출하였다. "
-        f"결제수단은 {expense['payment_method']}이며, "
-        f"사용처는 {expense['place']}이다. "
-        f"메모: {expense['memo']}."
+class IncomeIn(BaseModel):
+    date: str               # 날짜
+    time: str               # 시간
+    is_fixed_income: bool   # 고정지출 여부
+    category: str           # 카테고리
+    amount: int             # 금액
+    deposit_method: str     # 입금방법
+    deposit_source: str     # 입금처
+    memo: str               # 메모
+
+def create_sentence(data: Dict[str, Any]) -> str:
+    # 고정 지출 여부에 따른 텍스트 변환
+    if "is_fixed_expense" in data:
+        expense_type = "고정" if data['is_fixed_expense'] else "변동"
+        return (
+            f"{data['date']} {data['time']}에 {data['category']} 카테고리로 "
+            f"{data['amount']}원을 지출하였다. "
+            f"이 지출은 {expense_type} 지출이며, "
+            f"결제수단은 {data['payment_method']}이고, "
+            f"사용처는 {data['place']}이다. "
+            f"메모: {data['memo']}."
+        )
+    elif "is_fixed_income" in data:
+        income_type = "고정" if data['is_fixed_income'] else "변동"
+    
+        return (
+            f"{data['date']} {data['time']}에 {data['amount']}원의 "
+            f"수입이 발생하였다. "
+            f"이 수입은 {income_type} 수입이며, "
+            f"입금방법은 {data['deposit_method']}이고, "
+            f"입금처는 {data['deposit_source']}이다. "
+            f"메모: {data['memo']}."
     )
+    raise ValueError(f"지원하지 않는 데이터 형식입니다: {data}")
 
-def build_expense_rag_record(expense: Dict[str, Any]) -> Dict[str, Any]:
-    rag_text = expense_to_sentence(expense)
+
+def build_rag_record(data: Dict[str, Any]) -> Dict[str, Any]:
+    rag_text = create_sentence(data)
     embedding = call_embed_api(rag_text)
 
     return {
-        **expense,
+        **data,
         "embedding": embedding
     }
 
-def update_monthly_summary(summary: MonthlySummary, expense: ExpenseIn, mode: str = "add"):
+def update_summary(summary: SummaryIn, data: Union[ExpenseIn, IncomeIn], mode: str = "add"):
     """
-    지출 변동분을 요약본에 반영
+    수익/지출 변동분을 요약본(SummaryIn)의 고정/변동 섹션에 각각 반영
     """
     multiplier = 1 if mode == "add" else -1
-    change = expense.amount * multiplier
+    amount_change = data.amount * multiplier
 
-    # 카테고리 업데이트
-    cat = expense.category
-    summary.category_totals[cat] = summary.category_totals.get(cat, 0) + change
+    # 지출(ExpenseIn) 처리
+    if isinstance(data, ExpenseIn):
+        # 총 지출 업데이트
+        summary.total_expense += amount_change
+        
+        # 고정 vs 변동 구분하여 상세 내역 업데이트
+        if data.is_fixed_expense:
+            target_dict = summary.fixed_expense_details
+        else:
+            target_dict = summary.variable_expense_details
+        
+        # 카테고리별 합산
+        cat = data.category
+        target_dict[cat] = target_dict.get(cat, 0) + amount_change
+        if target_dict[cat] <= 0: del target_dict[cat]
 
-    # 결제 수단 업데이트
-    pay = expense.payment_method
-    summary.payment_method_totals[pay] = summary.payment_method_totals.get(pay, 0) + change
-    
-    # 0원 항목 정리
-    if summary.category_totals.get(cat) == 0:
-        del summary.category_totals[cat]
-    
+    # 수익(IncomeIn) 처리
+    elif isinstance(data, IncomeIn):
+        # 총 수익 업데이트
+        summary.total_income += amount_change
+        
+        # 고정 vs 변동 구분하여 상세 내역 업데이트
+        if data.is_fixed_income:
+            target_dict = summary.fixed_income_details
+        else:
+            target_dict = summary.variable_income_details
+            
+        # 카테고리별 합산
+        cat = data.category
+        target_dict[cat] = target_dict.get(cat, 0) + amount_change
+        if target_dict[cat] <= 0: del target_dict[cat]
+
+    # 3. 가용 예산(total_budget) 및 저축(saving) 자동 계산 (필요 시)
+    # 예: 가용 예산 = 고정 수익 - 고정 지출 - 저축
+    fixed_inc = sum(summary.fixed_income_details.values())
+    fixed_exp = sum(summary.fixed_expense_details.values())
+    summary.total_budget = fixed_inc - fixed_exp - summary.saving
+
     return summary
 
-def process_expense_change(uid: str, expense: ExpenseIn, mode: str = "add"):
+def process_expense_change(uid: str, data: Union[ExpenseIn, IncomeIn], mode: str = "add"):
     """
     DB 요약본 업데이트 처리
     """
-    year_month = expense.date[:7]
+    year_month = data.date[:7]
     doc_ref = db.collection("users").document(uid).collection("summaries").document(year_month)
     doc = doc_ref.get()
 
     if doc.exists:
-        summary = MonthlySummary(**doc.to_dict())
+        summary = SummaryIn(**doc.to_dict())
     else:
         # 텍스트 생성 후 즉시 임베딩화하여 저장
         text = f"{year_month} 지출 요약 및 통계 내역"
         embedding = call_embed_api(text)
-        summary = MonthlySummary(
+        summary = SummaryIn(
             year_month=year_month,
             embedding=embedding
         )
 
-    updated_summary = update_monthly_summary(summary, expense, mode)
+    updated_summary = update_summary(summary, data, mode)
     doc_ref.set(updated_summary.dict(), merge=True)
 
 def call_embed_api(text: str) -> List[float]:
