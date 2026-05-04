@@ -8,6 +8,27 @@ from pydantic import BaseModel
 from app.auth import verify_firebase_token
 from app.firebase_client import get_firestore_client
 from app.rag_engine import answer_question, build_rag_record, process_expense_change, ExpenseIn, IncomeIn, SummaryIn
+from app.budget import (
+    BudgetOut,
+    FixedIncomeBudget,
+    FixedExpenseBudget,
+    SavingUpdateRequest,
+    BudgetDetailsUpdateRequest,
+    load_budgets,
+    load_budget,
+    load_fixed_incomes,
+    load_fixed_expenses,
+    update_saving,
+    update_budget_details,
+    create_fixed_income,
+    update_fixed_income,
+    delete_fixed_income,
+    create_fixed_expense,
+    update_fixed_expense,
+    delete_fixed_expense,
+    recommend_and_save_budget,
+    carry_over_budget_raw,
+)
 
 app = FastAPI(title="HouseHold RAG API")
 
@@ -209,7 +230,7 @@ def create_Income(income_in: IncomeIn, uid: str = Depends(verify_firebase_token)
         print("create_expense error =", str(e), flush=True)
         raise
 
-@app.put("/Incomes/{Income_id}", response_model=Income)
+@app.put("/Incomes/{income_id}", response_model=Income)
 def update_Income(income_id: str, income_in: IncomeIn, uid: str = Depends(verify_firebase_token)):
     doc_ref = db.collection("users").document(uid).collection("Incomes").document(income_id)
 
@@ -234,7 +255,7 @@ def update_Income(income_id: str, income_in: IncomeIn, uid: str = Depends(verify
         **income_in.model_dump()
     }
 
-@app.delete("/Incomes/{Income_id}")
+@app.delete("/Incomes/{income_id}")
 def delete_Income(income_id: str, uid: str = Depends(verify_firebase_token)):
     doc_ref = db.collection("users").document(uid).collection("Incomes").document(income_id)
 
@@ -266,13 +287,12 @@ def get_summary(uid: str = Depends(verify_firebase_token)):
             "variable_income_details": data["variable_income_details"],
             "fixed_expense_details": data["fixed_expense_details"],
             "variable_expense_details": data["variable_expense_details"],
-            "total_budget": data["total_budget"],
-            "saving": data["saving"],
-            "budget_details": data["budget_details"],
         })
 
     return summaries
 
+#앞으로 예산안 업데이트는 요약본에서 실행하지 않음.
+"""
 @app.put("/summaries/{summary_id}", response_model=Summary)
 def update_summary_budget(summary_id: str, summary_in: SummaryIn, uid: str = Depends(verify_firebase_token)):
     doc_ref = db.collection("users").document(uid).collection("summaries").document(summary_id)
@@ -292,8 +312,184 @@ def update_summary_budget(summary_id: str, summary_in: SummaryIn, uid: str = Dep
         "id": summary_id,
         **updated_doc
     }
+"""
 
-# 질문
-@app.post("/ask", response_model=AskResponse)
-def ask_api(request: AskRequest, uid: str = Depends(verify_firebase_token)):
-    return answer_question(uid, request.question)
+
+
+
+
+
+
+# =========================
+# Budgets
+# =========================
+
+@app.get("/budgets", response_model=List[BudgetOut])
+def get_budgets(uid: str = Depends(verify_firebase_token)):
+    return load_budgets(uid)
+
+
+@app.get("/budgets/{year_month}", response_model=BudgetOut)
+def get_budget(
+    year_month: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return load_budget(uid, year_month)
+
+
+@app.put("/budgets/{year_month}/saving", response_model=BudgetOut)
+def update_budget_saving_api(
+    year_month: str,
+    request: SavingUpdateRequest,
+    uid: str = Depends(verify_firebase_token)
+):
+    return update_saving(
+        uid=uid,
+        year_month=year_month,
+        saving=request.saving
+    )
+
+
+@app.put("/budgets/{year_month}/details", response_model=BudgetOut)
+def update_budget_details_api(
+    year_month: str,
+    request: BudgetDetailsUpdateRequest,
+    uid: str = Depends(verify_firebase_token)
+):
+    return update_budget_details(
+        uid=uid,
+        year_month=year_month,
+        budget_details=request.budget_details,
+        created_by="user"
+    )
+
+
+@app.post("/budgets/{year_month}/recommend")
+def recommend_budget_api(
+    year_month: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return recommend_and_save_budget(
+        uid=uid,
+        year_month=year_month
+    )
+
+
+#없어도 get_budget에서 자동으로 기존 예산안을 이월 해주지만, 확정성을 위해서 놔둠.
+@app.post("/budgets/{from_year_month}/carry-over/{to_year_month}")
+def carry_over_budget_api(
+    from_year_month: str,
+    to_year_month: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return carry_over_budget_raw(
+        uid=uid,
+        from_year_month=from_year_month,
+        to_year_month=to_year_month
+    )
+    
+
+# =========================
+# Fixed incomes for budget
+# =========================
+
+@app.get("/budgets/{year_month}/fixed-incomes")
+def get_fixed_incomes_api(
+    year_month: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return load_fixed_incomes(uid, year_month)
+
+
+@app.post("/budgets/{year_month}/fixed-incomes")
+def create_fixed_income_api(
+    year_month: str,
+    request: FixedIncomeBudget,
+    uid: str = Depends(verify_firebase_token)
+):
+    return create_fixed_income(
+        uid=uid,
+        year_month=year_month,
+        fixed_income=request
+    )
+
+
+@app.put("/budgets/{year_month}/fixed-incomes/{fixed_income_id}")
+def update_fixed_income_api(
+    year_month: str,
+    fixed_income_id: str,
+    request: FixedIncomeBudget,
+    uid: str = Depends(verify_firebase_token)
+):
+    return update_fixed_income(
+        uid=uid,
+        year_month=year_month,
+        fixed_income_id=fixed_income_id,
+        fixed_income=request
+    )
+
+
+@app.delete("/budgets/{year_month}/fixed-incomes/{fixed_income_id}")
+def delete_fixed_income_api(
+    year_month: str,
+    fixed_income_id: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return delete_fixed_income(
+        uid=uid,
+        year_month=year_month,
+        fixed_income_id=fixed_income_id
+    )
+
+
+# =========================
+# Fixed expenses for budget
+# =========================
+
+@app.get("/budgets/{year_month}/fixed-expenses")
+def get_fixed_expenses_api(
+    year_month: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return load_fixed_expenses(uid, year_month)
+
+
+@app.post("/budgets/{year_month}/fixed-expenses")
+def create_fixed_expense_api(
+    year_month: str,
+    request: FixedExpenseBudget,
+    uid: str = Depends(verify_firebase_token)
+):
+    return create_fixed_expense(
+        uid=uid,
+        year_month=year_month,
+        fixed_expense=request
+    )
+
+
+@app.put("/budgets/{year_month}/fixed-expenses/{fixed_expense_id}")
+def update_fixed_expense_api(
+    year_month: str,
+    fixed_expense_id: str,
+    request: FixedExpenseBudget,
+    uid: str = Depends(verify_firebase_token)
+):
+    return update_fixed_expense(
+        uid=uid,
+        year_month=year_month,
+        fixed_expense_id=fixed_expense_id,
+        fixed_expense=request
+    )
+
+
+@app.delete("/budgets/{year_month}/fixed-expenses/{fixed_expense_id}")
+def delete_fixed_expense_api(
+    year_month: str,
+    fixed_expense_id: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return delete_fixed_expense(
+        uid=uid,
+        year_month=year_month,
+        fixed_expense_id=fixed_expense_id
+    )

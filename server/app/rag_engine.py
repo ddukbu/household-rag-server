@@ -9,19 +9,17 @@ from app.firebase_client import get_firestore_client
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from typing import Dict
+from app.budget import load_budgets
+from app.llm_client import call_gemini
+#app.budget과 app.rag_engine 사이 순환 import 관계를 끊기 위해 call_gemini 함수를 따로 app.llm_client에 분리.
 
 
 # db
 db = get_firestore_client()
 
-# api model
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# api key, embedding model
 
-GENERATION_MODEL = "gemini-2.5-flash"
-GENERATE_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GENERATION_MODEL}:generateContent"
-)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBED_URL = (
@@ -41,10 +39,12 @@ class SummaryIn(BaseModel):
     # 지출 섹션
     fixed_expense_details: Dict[str, int] = {}      # 고정 지출
     variable_expense_details: Dict[str, int] = {}   # 변동 지출
-    # 예산 설정 섹션
+    """
+    # 예산 설정 섹션 -> budget.py로 구조 이동, 요약본은 실제 수입/지출 통계만 관리
     total_budget: int = 0                           # 가용 예산 (고정 수익 - 고정 지출 - 저축)
     saving: int = 0                                 # 저축
     budget_details: Dict[str, int] = {}             # 카테고리별 예산 설정
+    """
 
 
 class ExpenseIn(BaseModel):
@@ -141,11 +141,13 @@ def update_summary(summary: SummaryIn, data: Union[ExpenseIn, IncomeIn], mode: s
         target_dict[cat] = target_dict.get(cat, 0) + amount_change
         if target_dict[cat] <= 0: del target_dict[cat]
 
+    """
     # 3. 가용 예산(total_budget) 및 저축(saving) 자동 계산 (필요 시)
     # 예: 가용 예산 = 고정 수익 - 고정 지출 - 저축
     fixed_inc = sum(summary.fixed_income_details.values())
     fixed_exp = sum(summary.fixed_expense_details.values())
     summary.total_budget = fixed_inc - fixed_exp - summary.saving
+    """
 
     return summary
 
@@ -200,55 +202,7 @@ def call_embed_api(text: str) -> List[float]:
     data = response.json()
     return data["embedding"]["values"]
 
-def call_gemini(prompt: str) -> str:
-    """
-    작성된 프롬프트를 Gemini 모델에 전달하고 AI의 답변 반환
-    네트워크 오류 발생 시 최대 3번까지 재시도
-    """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY,
-    }
-    payload = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ]
-    }
-
-    max_retries = 3
-    delay = 2
-
-    for attempt in range(max_retries):
-        response = requests.post(
-            GENERATE_URL,
-            headers=headers,
-            json=payload,
-            timeout=120
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return "응답을 생성하지 못했습니다."
-
-            parts = candidates[0].get("content", {}).get("parts", [])
-            texts = [part.get("text", "") for part in parts if "text" in part]
-            return "\n".join(texts).strip()
-
-        if response.status_code in (429, 500, 503) and attempt < max_retries - 1:
-            time.sleep(delay)
-            delay *= 2
-            continue
-
-        response.raise_for_status()
-
-    return "응답을 생성하지 못했습니다."
+#기존 call_gemini를 llm_client.py로 이동.
 
 def transform_query(question: str) -> str:
     now = datetime.now()
@@ -424,6 +378,7 @@ def retrieve_relevant_docs(
 def build_prompt(
         question: str, 
         summaries: List[Dict[str, Any]], 
+        budgets: List[Dict[str, Any]],
         docs: List[Dict[str, Any]], 
         histories: List[Dict[str, Any]]
         ) -> str:
@@ -433,6 +388,7 @@ def build_prompt(
     
     # 검색된 문서 리스트를 JSON 문자열로 변환
     summary_context = get_expenses_json(summaries)
+    budget_context = get_expenses_json(budgets)
     expense_context = get_expenses_json(docs)
     history_context = get_expenses_json(histories)
 
@@ -467,9 +423,13 @@ def build_prompt(
    - 요약본에 없는 구체적인 통계(예: 특정 식당 방문 횟수, 특정 시간대 지출 등)는 **[상세 지출 내역]**을 바탕으로 직접 계산하되, "검색된 내역을 바탕으로 확인한 결과~"와 같은 표현을 사용하여 데이터가 일부일 수 있음을 암시해라.
 2. **상세 내역의 유연성:** 상세 내역을 단순히 나열하지 말고, 질문의 맥락에 맞게 분석하여 답변에 녹여내라. (예: "주로 점심시간에 편의점 지출이 많으시네요")
 3. **인사이트 제공 (중요):** 데이터 분석 후에는 반드시 사용자의 소비 습관에 도움이 될 만한 **팁이나 조언**을 한 문장 이상 포함해라.
+4. **예산안 추천:** 
+    - [예산안]은 사용자가 설정했거나 AI가 추천한 계획 데이터이다.
+    - 예산 초과/잔여 예산을 판단할 때는 [예산안]의 budget_details와 [월별 요약]의 variable_expense_details를 비교해라.
 
 ### [참고 데이터]
 * [월별 요약]: {summary_context}
+* [예산안]: {budget_context}
 * [상세 지출 내역]: {expense_context}
 * [이전 대화]: {history_context}
 
@@ -507,6 +467,8 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
 
     # 월별 요약본 로드
     summaries = load_monthly_summaries(uid)
+    # 설정한 예산안 로드
+    budgets = load_budgets(uid)
     # 데이터 로드
     expenses = load_expenses(uid)
     # 대화 내역 로드
@@ -520,7 +482,7 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     retrieval_elapsed = time.time() - start
 
     # 프롬프트 생성
-    prompt = build_prompt(question, summaries, docs, histories)
+    prompt = build_prompt(question, summaries, budgets, docs, histories)
 
     # 시간 측정
     gen_start = time.time()
