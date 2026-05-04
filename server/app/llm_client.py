@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+from typing import List
 
 #api model
 
@@ -11,6 +12,13 @@ GENERATE_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GENERATION_MODEL}:generateContent"
 )
+
+EMBEDDING_MODEL = "gemini-embedding-001"
+EMBED_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{EMBEDDING_MODEL}:embedContent"
+)
+
 
 
 def call_gemini(prompt: str) -> str:
@@ -65,3 +73,30 @@ def call_gemini(prompt: str) -> str:
         response.raise_for_status()
 
     return "응답을 생성하지 못했습니다."
+
+
+def call_embed_api(text: str) -> List[float]:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY,
+    }
+
+    payload = {
+        "content": {
+            "parts": [{"text": text}]
+        }
+    }
+
+    response = requests.post(
+        EMBED_URL,
+        headers=headers,
+        json=payload,
+        timeout=120
+    )
+
+    response.raise_for_status()
+    data = response.json()
+    return data["embedding"]["values"]

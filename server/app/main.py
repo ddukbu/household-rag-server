@@ -26,8 +26,11 @@ from app.budget import (
     create_fixed_expense,
     update_fixed_expense,
     delete_fixed_expense,
-    recommend_and_save_budget,
     carry_over_budget_raw,
+    BudgetDraftRequest,
+    create_budget_draft,
+    apply_budget_draft,
+    cancel_budget_draft,
 )
 
 app = FastAPI(title="HouseHold RAG API")
@@ -291,6 +294,39 @@ def get_summary(uid: str = Depends(verify_firebase_token)):
 
     return summaries
 
+
+@app.get("/chat-history")
+def get_chat_history_api(uid: str = Depends(verify_firebase_token)):
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("chat_history")
+        .order_by("created_at")
+        .stream()
+    )
+
+    return [
+        {
+            "id": doc.id,
+            **doc.to_dict()
+        }
+        for doc in docs
+    ]
+
+
+@app.post("/ask", response_model=AskResponse)
+def ask_api(request: AskRequest, uid: str = Depends(verify_firebase_token)):
+    return answer_question(uid, request.question)
+
+
+@app.post("/analysis")
+def analyze_spending(
+    uid: str = Depends(verify_firebase_token)
+):
+    question = "최근 카테고리별 소비 패턴을 분석해줘."
+    return answer_question(uid, question)
+
+
 #앞으로 예산안 업데이트는 요약본에서 실행하지 않음.
 """
 @app.put("/summaries/{summary_id}", response_model=Summary)
@@ -364,6 +400,43 @@ def update_budget_details_api(
     )
 
 
+@app.post("/budgets/{year_month}/draft")
+def create_budget_draft_api(
+    year_month: str,
+    request: BudgetDraftRequest,
+    uid: str = Depends(verify_firebase_token)
+):
+    return create_budget_draft(
+        uid=uid,
+        year_month=year_month,
+        request=request
+    )
+
+
+@app.post("/budgets/{year_month}/apply-draft")
+def apply_budget_draft_api(
+    year_month: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return apply_budget_draft(
+        uid=uid,
+        year_month=year_month
+    )
+
+
+@app.delete("/budgets/{year_month}/draft")
+def cancel_budget_draft_api(
+    year_month: str,
+    uid: str = Depends(verify_firebase_token)
+):
+    return cancel_budget_draft(
+        uid=uid,
+        year_month=year_month
+    )
+
+
+"""
+#기존의 제안 즉시 예산안으로 적용하는 api는 사용x
 @app.post("/budgets/{year_month}/recommend")
 def recommend_budget_api(
     year_month: str,
@@ -373,6 +446,7 @@ def recommend_budget_api(
         uid=uid,
         year_month=year_month
     )
+"""
 
 
 #없어도 get_budget에서 자동으로 기존 예산안을 이월 해주지만, 확정성을 위해서 놔둠.

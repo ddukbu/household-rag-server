@@ -9,23 +9,15 @@ from app.firebase_client import get_firestore_client
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from typing import Dict
-from app.budget import load_budgets
-from app.llm_client import call_gemini
-#app.budget과 app.rag_engine 사이 순환 import 관계를 끊기 위해 call_gemini 함수를 따로 app.llm_client에 분리.
+#from app.budget import load_budgets
+from app.llm_client import call_gemini, call_embed_api
+#app.budget과 app.rag_engine 사이 순환 import 관계를 끊기 위해 call_gemini, call_embed_api 함수를 따로 app.llm_client에 분리.
+from app.rag_utils import load_chat_history, save_chat_history, retrieve_relevant_chat_history, cosine_similarity
+#마찬가지로 기본 rag util을 분리
 
 
 # db
 db = get_firestore_client()
-
-# api key, embedding model
-
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-
-EMBEDDING_MODEL = "gemini-embedding-001"
-EMBED_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{EMBEDDING_MODEL}:embedContent"
-)
 
 class SummaryIn(BaseModel):
     year_month: str
@@ -173,36 +165,12 @@ def process_expense_change(uid: str, data: Union[ExpenseIn, IncomeIn], mode: str
     updated_summary = update_summary(summary, data, mode)
     doc_ref.set(updated_summary.dict(), merge=True)
 
-def call_embed_api(text: str) -> List[float]:
-    """
-    전달받은 텍스트(질문 또는 지출 내역)를 Gemini 모델에 보내 
-    의미적 특징이 담긴 숫자 리스트(임베딩)로 변환
-    """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
 
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY,
-    }
+#기존 call_embed_api를 llm_client.py로 이동.
 
-    payload = {
-        "content": {
-            "parts": [{"text": text}]
-        }
-    }
-
-    response = requests.post(
-        EMBED_URL,
-        headers=headers,
-        json=payload,
-        timeout=120
-    )
-    response.raise_for_status()
-    data = response.json()
-    return data["embedding"]["values"]
 
 #기존 call_gemini를 llm_client.py로 이동.
+
 
 def transform_query(question: str) -> str:
     now = datetime.now()
@@ -262,27 +230,6 @@ def load_expenses(uid: str) -> List[Dict[str, Any]]:
     # 모든 문서가 담긴 리스트 반환
     return expenses
 
-def load_chat_history(uid: str) -> List[Dict[str, Any]]:
-    """
-    Firestore의 'chat_history' 컬렉션에 있는 모든 대화 기록을 읽어와 
-    파이썬 딕셔너리 리스트 형태로 반환합니다.
-    """
-    # 'chat_history' 컬렉션 내의 모든 문서를 스트림 형태로 로드
-    docs = db.collection("users").document(uid).collection("chat_history").stream()
-    # 결과 데이터를 담을 빈 리스트 초기화
-    chat_history = []
-    # 가져온 문서들을 하나씩 순회하며 처리
-    # 문서를 id를 추가한 딕셔너리로 변환하여 리스트에 추가
-    for doc in docs:
-        # 문서를 딕셔너리로 변환
-        data = doc.to_dict()
-        # id를 추가한 딕셔너리 리스트에 추가
-        chat_history.append({
-            "id": doc.id,
-            **data         
-        })
-    return chat_history
-
 def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
     """
     전체 데이터 리스트에서 RAG 관련 필드(score, embedding)를 제외하고
@@ -303,20 +250,7 @@ def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
     
     # 한글 깨짐 방지를 위해 ensure_ascii=False 설정
     return json.dumps(clean_list, ensure_ascii=False, indent=4)
-  
-def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
-    """
-    벡터 a와 b 사이의 각도 코사인 값을 계산하여 유사도를 측정합니다.
-    결과값은 1.0에 가까울수록 매우 유사하고, 0.0에 가까울수록 관련이 없음을 의미합니다.
-    """
-    a = np.array(vec_a, dtype=np.float32)
-    b = np.array(vec_b, dtype=np.float32)
 
-    denom = np.linalg.norm(a) * np.linalg.norm(b)
-    if denom == 0:
-        return 0.0
-
-    return float(np.dot(a, b) / denom)
 
 def retrieve_relevant_docs(
         question: str, 
@@ -378,7 +312,6 @@ def retrieve_relevant_docs(
 def build_prompt(
         question: str, 
         summaries: List[Dict[str, Any]], 
-        budgets: List[Dict[str, Any]],
         docs: List[Dict[str, Any]], 
         histories: List[Dict[str, Any]]
         ) -> str:
@@ -388,7 +321,7 @@ def build_prompt(
     
     # 검색된 문서 리스트를 JSON 문자열로 변환
     summary_context = get_expenses_json(summaries)
-    budget_context = get_expenses_json(budgets)
+    #budget_context = get_expenses_json(budgets)
     expense_context = get_expenses_json(docs)
     history_context = get_expenses_json(histories)
 
@@ -423,13 +356,9 @@ def build_prompt(
    - 요약본에 없는 구체적인 통계(예: 특정 식당 방문 횟수, 특정 시간대 지출 등)는 **[상세 지출 내역]**을 바탕으로 직접 계산하되, "검색된 내역을 바탕으로 확인한 결과~"와 같은 표현을 사용하여 데이터가 일부일 수 있음을 암시해라.
 2. **상세 내역의 유연성:** 상세 내역을 단순히 나열하지 말고, 질문의 맥락에 맞게 분석하여 답변에 녹여내라. (예: "주로 점심시간에 편의점 지출이 많으시네요")
 3. **인사이트 제공 (중요):** 데이터 분석 후에는 반드시 사용자의 소비 습관에 도움이 될 만한 **팁이나 조언**을 한 문장 이상 포함해라.
-4. **예산안 추천:** 
-    - [예산안]은 사용자가 설정했거나 AI가 추천한 계획 데이터이다.
-    - 예산 초과/잔여 예산을 판단할 때는 [예산안]의 budget_details와 [월별 요약]의 variable_expense_details를 비교해라.
 
 ### [참고 데이터]
 * [월별 요약]: {summary_context}
-* [예산안]: {budget_context}
 * [상세 지출 내역]: {expense_context}
 * [이전 대화]: {history_context}
 
@@ -439,24 +368,6 @@ def build_prompt(
 답변 (핵심 위주로 친절하게):
 """.strip()
 
-def save_chat_history(uid: str, question: str, answer: str):
-    """
-    질문, 답변, 그리고 '대화 시점'을 하나의 문장으로 묶어 임베딩합니다.
-    """
-    # 대화 시점 계산
-    kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst)
-    time_str = now.strftime('%Y년 %m월 %d일 %H시 %M분')
-    
-    # 검색을 위해 대화 시점과 질문, 답변을 합친 텍스트를 임베딩
-    context_text = f"대화 시점: {time_str}\n질문: {question}\n답변: {answer}"
-    embedding = call_embed_api(context_text)
-    
-    # Firestore 저장
-    db.collection("users").document(uid).collection("chat_history").add({
-        "context_text": context_text,
-        "embedding": embedding,
-    })
 
 def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
@@ -468,7 +379,7 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 월별 요약본 로드
     summaries = load_monthly_summaries(uid)
     # 설정한 예산안 로드
-    budgets = load_budgets(uid)
+    #budgets = load_budgets(uid)
     # 데이터 로드
     expenses = load_expenses(uid)
     # 대화 내역 로드
@@ -482,7 +393,7 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     retrieval_elapsed = time.time() - start
 
     # 프롬프트 생성
-    prompt = build_prompt(question, summaries, budgets, docs, histories)
+    prompt = build_prompt(question, summaries, docs, histories)
 
     # 시간 측정
     gen_start = time.time()
@@ -496,7 +407,7 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     print(answer)
 
     # 대화 내용 저장
-    save_chat_history(uid, question, answer)
+    save_chat_history(uid, question, answer, "general")
 
     # 답변 반환
     return {

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from app.firebase_client import get_firestore_client
 from app.llm_client import call_gemini
+from app.rag_utils import load_chat_history, retrieve_relevant_chat_history, save_chat_history
 
 db = get_firestore_client()
 
@@ -720,9 +721,43 @@ def delete_fixed_expense(
 # AI recommendation
 # =========================
 
+"""
+#AI 예산안 추천 프롬프트에 넣을 채팅 기록을 RAG 방식으로 전달하는 것으로 대체 -> 추후 이 방식이 더 정확도 높을 경우 변경?
+def load_budget_chat_history(uid: str) -> List[Dict[str, Any]]:
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("chat_history")
+        .stream()
+    )
+
+    histories = []
+
+    for doc in docs:
+        data = doc.to_dict()
+        histories.append({
+            "id": doc.id,
+            **data
+        })
+
+    return histories[-10:]
+"""
+
+
 def parse_ai_budget_response(answer: str) -> Dict[str, Any]:
+    cleaned = answer.strip()
+
+    if cleaned.startswith("```json"):
+        cleaned = cleaned.replace("```json", "", 1).strip()
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.replace("```", "", 1).strip()
+
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3].strip()
+
     try:
-        result = json.loads(answer)
+        result = json.loads(cleaned)
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=500,
@@ -730,16 +765,10 @@ def parse_ai_budget_response(answer: str) -> Dict[str, Any]:
         )
 
     if result.get("type") != "budget_recommendation":
-        raise HTTPException(
-            status_code=500,
-            detail="AI 응답이 예산 추천 형식이 아닙니다."
-        )
+        raise HTTPException(status_code=500, detail="AI 응답이 예산 추천 형식이 아닙니다.")
 
     if "budget_details" not in result:
-        raise HTTPException(
-            status_code=500,
-            detail="AI 응답에 budget_details가 없습니다."
-        )
+        raise HTTPException(status_code=500, detail="AI 응답에 budget_details가 없습니다.")
 
     return result
 
@@ -771,21 +800,64 @@ def get_budget_mode_instruction(mode: str) -> str:
 """
 
 
+def get_budget_mode_question(mode: str, user_message: str = "") -> str:
+    button_text = {
+        "saving": "특수 버튼 : 절약",
+        "relaxed": "특수 버튼 : 여유",
+        "balanced": "특수 버튼 : 균형",
+    }.get(mode, "특수 버튼 : 균형")
+
+    if user_message.strip():
+        return f"{button_text}\n{user_message.strip()}"
+
+    return button_text
+
+
 def recommend_budget_with_ai(
     uid: str,
     year_month: str,
     total_budget: int,
     saving: int,
     cur_budget_details: Dict[str, Any],
-    cur_remaining_budget_details: Dict[str, Any]
+    cur_remaining_budget_details: Dict[str, Any],
+    mode: str,
+    user_message: str = ""
 ) -> Dict[str, Any]:
-    summary = load_summary(uid, year_month)
+    
+    try:
+        summary = load_summary(uid, year_month)
+    except HTTPException:
+        summary = {
+            "variable_expense_details": {}
+        }
+    
     fixed_incomes = load_fixed_incomes(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
+    chat_histories = load_chat_history(uid)
+
+    #현재 사용자가 요청한 예산안 추천에 대해 RAG 방식으로 유사한 채팅 기록을 찾아 AI에게 전달하기 위한 임시 쿼리
+    query_for_history = f"""
+    예산안 추천 요청
+    월: {year_month}
+    모드: {mode}
+    사용자 요청: {user_message}
+    현재 예산안: {cur_budget_details}
+    현재 남은 예산: {cur_remaining_budget_details}
+    """
+
+    relevant_chat_histories = retrieve_relevant_chat_history(
+        query=query_for_history,
+        histories=chat_histories,
+        threshold=0.75,
+        min_k=0,
+        max_k=3
+    )
 
 
     variable_expense_details = summary.get("variable_expense_details", {})
     variable_categories = list(variable_expense_details.keys())
+
+    mode_instruction = get_budget_mode_instruction(mode)
 
     prompt = f"""
 너는 사용자의 소비 계획을 도와주는 예산 추천 AI이다.
@@ -795,6 +867,11 @@ def recommend_budget_with_ai(
 - [예산안용 고정 수입/지출]은 사용자가 예산 계획을 위해 따로 입력한 데이터이다.
 - 가용 예산 계산에는 [예산안용 고정 수입/지출]과 [저축 금액]만 사용한다.
 - 너는 이미 계산된 [예산 가용 금액]을 변동 지출 카테고리별로 나누면 된다.
+- 이 응답은 임시 예산안이다. 사용자가 확인하기 전까지 실제 예산안으로 적용되지 않는다.
+
+
+[예산 추천 유형별 프롬프트]
+{mode_instruction}
 
 [월]
 {year_month}
@@ -819,6 +896,12 @@ def recommend_budget_with_ai(
 
 [변동 지출 카테고리별 남은 예산]
 {cur_remaining_budget_details}
+
+[관련 이전 대화 기록]
+{relevant_chat_histories}
+
+[사용자 추가 요청]
+{user_message}
 
 [사용 가능한 변동 지출 카테고리]
 {variable_categories}
@@ -851,6 +934,200 @@ JSON 바깥에 설명 문장을 절대 쓰지 마라.
     return parse_ai_budget_response(answer)
 
 
+def create_budget_draft(
+    uid: str,
+    year_month: str,
+    request: BudgetDraftRequest
+) -> Dict[str, Any]:
+    budget = load_budget(uid, year_month)
+
+    saving = budget.get("saving", 0)
+    total_budget = calculate_total_budget(uid, year_month, saving)
+
+    cur_budget_details = budget.get("budget_details", {})
+    cur_remaining_budget_details = budget.get("remaining_budget_details", {})
+
+    ai_result = recommend_budget_with_ai(
+        uid=uid,
+        year_month=year_month,
+        total_budget=total_budget,
+        saving=saving,
+        cur_budget_details=cur_budget_details,
+        cur_remaining_budget_details=cur_remaining_budget_details,
+        mode=request.mode,
+        user_message=request.user_message
+    )
+
+    draft_budget_details = ai_result["budget_details"]
+
+    validate_budget_details(
+        budget_details=draft_budget_details,
+        total_budget=total_budget
+    )
+
+    draft_remaining_budget_details = calculate_remaining_budget_details(
+        uid=uid,
+        year_month=year_month,
+        total_budget=total_budget,
+        budget_details=draft_budget_details
+    )
+
+    draft_state = calculate_budget_state(
+        saving=saving,
+        remaining_budget_details=draft_remaining_budget_details
+    )
+
+    draft_data = {
+        "type": "budget_draft",
+        "message": ai_result.get("message", "AI가 임시 예산안을 추천했습니다."),
+        "year_month": year_month,
+        "mode": request.mode,
+        "saving": saving,
+        "total_budget": total_budget,
+        "budget_details": draft_budget_details,
+        "remaining_budget_details": draft_remaining_budget_details,
+        "state": draft_state,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    budget_draft_ref(uid, year_month).set(draft_data, merge=True)
+
+
+    # 여기서부터는 AI가 생성한 추천 예산안과 사용자 요청을 채팅 기록에 저장.
+    question_text = get_budget_mode_question(
+        mode=request.mode,
+        user_message=request.user_message
+    )
+
+    answer_text = f"""
+    {draft_data["message"]}
+
+    추천 예산안:
+    {json.dumps(draft_data["budget_details"], ensure_ascii=False, indent=2)}
+
+    남은 예산:
+    {json.dumps(draft_data["remaining_budget_details"], ensure_ascii=False, indent=2)}
+    """.strip()
+
+    save_chat_history(
+        uid=uid,
+        question=question_text,
+        answer=answer_text,
+        mode="budget"
+    )
+
+    return draft_data
+
+
+def apply_budget_draft(
+    uid: str,
+    year_month: str
+) -> Dict[str, Any]:
+    draft_doc = budget_draft_ref(uid, year_month).get()
+
+    if not draft_doc.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="적용할 임시 예산안이 없습니다."
+        )
+
+    draft = draft_doc.to_dict()
+
+    budget_details = draft.get("budget_details", {})
+    saving = draft.get("saving", 0)
+    total_budget = calculate_total_budget(uid, year_month, saving)
+
+    validate_budget_details(
+        budget_details=budget_details,
+        total_budget=total_budget
+    )
+
+    remaining_budget_details = calculate_remaining_budget_details(
+        uid=uid,
+        year_month=year_month,
+        total_budget=total_budget,
+        budget_details=budget_details
+    )
+
+    state = calculate_budget_state(
+        saving=saving,
+        remaining_budget_details=remaining_budget_details
+    )
+
+    data = {
+        "year_month": year_month,
+        "saving": saving,
+        "total_budget": total_budget,
+        "budget_details": budget_details,
+        "remaining_budget_details": remaining_budget_details,
+        "state": state,
+        "created_by": "ai",
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    budget_ref(uid, year_month).set(data, merge=True)
+
+    # 적용 후 draft 삭제
+    budget_draft_ref(uid, year_month).delete()
+
+    answer_text = f"""
+AI 추천 예산안이 실제 예산안으로 적용되었습니다.
+
+적용된 예산안:
+{json.dumps(budget_details, ensure_ascii=False, indent=2)}
+
+남은 예산:
+{json.dumps(remaining_budget_details, ensure_ascii=False, indent=2)}
+""".strip()
+
+    save_chat_history(
+        uid=uid,
+        question="특수 버튼 : 확인",
+        answer=answer_text,
+        mode="budget"
+    )
+
+    return {
+        "message": "AI 추천 예산안이 실제 예산안으로 적용되었습니다.",
+        "budget": load_budget(uid, year_month)
+    }
+
+
+def cancel_budget_draft(
+    uid: str,
+    year_month: str
+) -> Dict[str, Any]:
+    draft_doc = budget_draft_ref(uid, year_month).get()
+
+    if draft_doc.exists:
+        draft = draft_doc.to_dict()
+        budget_draft_ref(uid, year_month).delete()
+
+        answer_text = f"""
+임시 예산안이 취소되었습니다.
+기존 예산안은 변경되지 않았습니다.
+
+취소된 임시 예산안:
+{json.dumps(draft.get("budget_details", {}), ensure_ascii=False, indent=2)}
+""".strip()
+    else:
+        answer_text = "취소할 임시 예산안이 없었습니다. 기존 예산안은 변경되지 않았습니다."
+
+    save_chat_history(
+        uid=uid,
+        question="특수 버튼 : 취소",
+        answer=answer_text,
+        mode="budget"
+    )
+
+    return {
+        "message": "임시 예산안이 취소되었습니다.",
+        "budget": load_budget(uid, year_month)
+    }
+
+
+"""
+#AI의 예산안 제안과 동시에 예산안을 수정해버리는 문제가 있어, 이 함수는 사용하지 않음.
 def recommend_and_save_budget(
     uid: str,
     year_month: str
@@ -913,3 +1190,4 @@ def recommend_and_save_budget(
         "message": ai_result.get("message", "AI 추천 예산안이 저장되었습니다."),
         "budget": load_budget(uid, year_month)
     }
+"""
