@@ -31,6 +31,7 @@ from app.budget import (
     create_budget_draft,
     apply_budget_draft,
     cancel_budget_draft,
+    refresh_total_budget,
 )
 from app.asset import (
     AssetOut,
@@ -141,6 +142,11 @@ def create_expense(expense_in: ExpenseIn, uid: str = Depends(verify_firebase_tok
         # [수정] 요약본 업데이트 호출
         process_expense_change(uid, expense_in, mode="add")
 
+        # 변동 지출 입력시 예산안 업데이트
+        if not expense_in.is_fixed_expense:
+            year_month = expense_in.date[:7]
+            refresh_total_budget(uid, year_month)
+
         return {
             "id": doc_ref.id,
             **expense_in.model_dump()
@@ -168,6 +174,21 @@ def update_expense(expense_id: str, expense_in: ExpenseIn, uid: str = Depends(ve
     # [수정] 요약본 업데이트 호출(로직: 기존 값 차감 -> 새 값 반영)
     # 새로운 데이터 요약본에 합산
     process_expense_change(uid, expense_in, mode="add")
+
+
+    # 변동 지출 수정시 예산안 업데이트
+    # 기존 지출의 월과 새 지출의 월이 다른 경우 둘 다 갱신 -> set이라서 year_month가 중복되면 한번만 갱신됨
+    months_to_refresh = set()
+
+    if not old_expense.is_fixed_expense:
+        months_to_refresh.add(old_expense.date[:7])
+
+    if not expense_in.is_fixed_expense:
+        months_to_refresh.add(expense_in.date[:7])
+
+    for year_month in months_to_refresh:
+        refresh_total_budget(uid, year_month)
+
     
     return {
         "id": expense_id,
@@ -186,6 +207,10 @@ def delete_expense(expense_id: str, uid: str = Depends(verify_firebase_token)):
     # Pydantic 모델로 변환 (필요한 필드만 추출)
     expense_in = ExpenseIn(**{k: v for k, v in expense_data.items() if k in ExpenseIn.__fields__})
     process_expense_change(uid, expense_in, mode="delete")
+
+    # 변동 지출 삭제시 예산안 업데이트
+    if not expense_in.is_fixed_expense:
+        refresh_total_budget(uid, expense_in.date[:7])
 
     doc_ref.delete()
     return {"message": "deleted"}

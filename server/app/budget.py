@@ -265,6 +265,17 @@ def refresh_total_budget(uid: str, year_month: str) -> Dict[str, Any]:
     saving = budget.get("saving", 0)
     budget_details = budget.get("budget_details", {})
 
+    try:
+        summary = load_summary(uid, year_month)
+        variable_expense_details = summary.get("variable_expense_details", {})
+    except HTTPException:
+        variable_expense_details = {}
+
+    # summary의 변동 지출 카테고리가 budget_details에 없으면 0원으로 추가
+    for category in variable_expense_details.keys():
+        if category not in budget_details:
+            budget_details[category] = 0
+
     total_budget = calculate_total_budget(uid, year_month, saving)
 
     validate_budget_details(budget_details, total_budget)
