@@ -32,6 +32,12 @@ from app.budget import (
     apply_budget_draft,
     cancel_budget_draft,
 )
+from app.asset import (
+    AssetOut,
+    InitialAssetRequest,
+    save_initial_asset,
+    load_asset_status,
+)
 
 app = FastAPI(title="HouseHold RAG API")
 
@@ -350,6 +356,28 @@ def update_summary_budget(summary_id: str, summary_in: SummaryIn, uid: str = Dep
     }
 """
 
+
+# =========================
+# Assets
+# =========================
+
+
+@app.put("/assets/initial", response_model=AssetOut)
+def update_initial_asset_api(
+    request: InitialAssetRequest,
+    uid: str = Depends(verify_firebase_token)
+):
+    return save_initial_asset(
+        uid=uid,
+        initial_asset=request.initial_asset
+    )
+
+
+@app.get("/assets", response_model=AssetOut)
+def get_asset_status_api(
+    uid: str = Depends(verify_firebase_token)
+):
+    return load_asset_status(uid)
 
 
 
