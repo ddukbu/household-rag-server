@@ -38,6 +38,7 @@ from app.asset import (
     InitialAssetRequest,
     save_initial_asset,
     load_asset_status,
+    rebuild_asset_history,
 )
 
 app = FastAPI(title="HouseHold RAG API")
@@ -405,7 +406,12 @@ def get_asset_status_api(
     return load_asset_status(uid)
 
 
-
+#월별 자산 기록을 조회할 때마다 변경된 가계부 데이터에 따른 월별 자산 기록을 갱신하여 리턴
+@app.get("/assets/history")
+def get_asset_history_api(
+    uid: str = Depends(verify_firebase_token)
+):
+    return rebuild_asset_history(uid)
 
 
 
