@@ -230,6 +230,50 @@ def load_expenses(uid: str) -> List[Dict[str, Any]]:
     # 모든 문서가 담긴 리스트 반환
     return expenses
 
+def load_incomes(uid: str) -> List[Dict[str, Any]]:
+    """
+    Firestore의 'incomes' 컬렉션에 있는 모든 문서를 읽어와 
+    파이썬 딕셔너리 리스트 형태로 반환합니다.
+    """
+    # 'expenses' 컬렉션 내의 모든 문서를 스트림 형태로 로드
+    docs = db.collection("users").document(uid).collection("incomes").stream()
+    # 결과 데이터를 담을 빈 리스트 초기화
+    incomes = []
+    # 가져온 문서들을 하나씩 순회하며 처리
+    # 문서를 id를 추가한 딕셔너리로 변환하여 리스트에 추가
+    for doc in docs:
+        # 문서를 딕셔너리로 변환
+        data = doc.to_dict()
+        # id를 추가한 딕셔너리 리스트에 추가
+        incomes.append({
+            "id": doc.id,  # Firestore가 자동으로 생성한 문서 고유 ID
+            **data         
+        })
+    # 모든 문서가 담긴 리스트 반환
+    return incomes
+
+def load_budgets(uid: str) -> List[Dict[str, Any]]:
+    """
+    Firestore의 'budgets' 컬렉션에 있는 모든 문서를 읽어와 
+    파이썬 딕셔너리 리스트 형태로 반환합니다.
+    """
+    # 'expenses' 컬렉션 내의 모든 문서를 스트림 형태로 로드
+    docs = db.collection("users").document(uid).collection("budgets").stream()
+    # 결과 데이터를 담을 빈 리스트 초기화
+    budgets = []
+    # 가져온 문서들을 하나씩 순회하며 처리
+    # 문서를 id를 추가한 딕셔너리로 변환하여 리스트에 추가
+    for doc in docs:
+        # 문서를 딕셔너리로 변환
+        data = doc.to_dict()
+        # id를 추가한 딕셔너리 리스트에 추가
+        budgets.append({
+            "id": doc.id,  # Firestore가 자동으로 생성한 문서 고유 ID
+            **data         
+        })
+    # 모든 문서가 담긴 리스트 반환
+    return budgets
+
 def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
     """
     전체 데이터 리스트에서 RAG 관련 필드(score, embedding)를 제외하고
@@ -255,7 +299,9 @@ def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
 def retrieve_relevant_docs(
         question: str, 
         summaries: List[Dict[str, Any]],
+        budgets: List[Dict[str, Any]],
         expenses: List[Dict[str, Any]], 
+        incomes: List[Dict[str, Any]],
         chat_histories: List[Dict[str, Any]], 
         ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
@@ -298,21 +344,25 @@ def retrieve_relevant_docs(
         # 최대 개수(max_k) 제한
         return passed[:max_k]
 
-    # 요약본: 날짜 매칭이 중요하므로 임계치를 높게 잡되, 최소 1개는 보장
-    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=0, max_k=3)
-    
+    # 요약본
+    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=1, max_k=3)
+    # 예산안
+    relevant_budgets = filter_docs(budgets, threshold=0.8, min_k=2, max_k=3)
     # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
-    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=0, max_k=30)
-    
+    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=1, max_k=30)
+    # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
+    relevant_incomes = filter_docs(incomes, threshold=0.7, min_k=1, max_k=30)
     # 대화 내역: 문맥 파악용으로 최대 3개
     relevant_histories = filter_docs(chat_histories, threshold=0.75, min_k=0, max_k=3)
 
-    return relevant_summaries, relevant_expenses, relevant_histories
+    return relevant_summaries, relevant_budgets, relevant_expenses, relevant_incomes, relevant_histories
 
 def build_prompt(
         question: str, 
         summaries: List[Dict[str, Any]], 
-        docs: List[Dict[str, Any]], 
+        budgets: List[Dict[str, Any]], 
+        expenses: List[Dict[str, Any]], 
+        incomes: List[Dict[str, Any]], 
         histories: List[Dict[str, Any]]
         ) -> str:
     """
@@ -321,8 +371,9 @@ def build_prompt(
     
     # 검색된 문서 리스트를 JSON 문자열로 변환
     summary_context = get_expenses_json(summaries)
-    #budget_context = get_expenses_json(budgets)
-    expense_context = get_expenses_json(docs)
+    budget_context = get_expenses_json(budgets)
+    expense_context = get_expenses_json(expenses)
+    incomes_context = get_expenses_json(incomes)
     history_context = get_expenses_json(histories)
 
     # LLM에게 전달할 시스템 프롬프트 및 컨텍스트 구성
@@ -335,9 +386,11 @@ def build_prompt(
 [질문]
 {question}
 
-[참고 내역]
+[참고 내역(요약본, 예산안, 지출 내역, 수입 내역)]
 {summary_context}
+{budget_context}
 {expense_context}
+{incomes_context}
 
 [이전 대화 내역]
 {history_context}
@@ -359,7 +412,9 @@ def build_prompt(
 
 ### [참고 데이터]
 * [월별 요약]: {summary_context}
+* [예산안 요약]: {budget_context}
 * [상세 지출 내역]: {expense_context}
+* [상세 수입 내역]: {incomes_context}
 * [이전 대화]: {history_context}
 
 ### [질문]
@@ -379,21 +434,22 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 월별 요약본 로드
     summaries = load_monthly_summaries(uid)
     # 설정한 예산안 로드
-    #budgets = load_budgets(uid)
+    budgets = load_budgets(uid)
     # 데이터 로드
     expenses = load_expenses(uid)
+    incomes = load_incomes(uid)
     # 대화 내역 로드
     chat_histories = load_chat_history(uid)
 
     # 시간 측정
     start = time.time()
     # 데이터 추출
-    summaries, docs, histories = retrieve_relevant_docs(transformed_query, summaries, expenses, chat_histories)
+    summaries, budgets, expenses, incomes, histories = retrieve_relevant_docs(transformed_query, summaries, budgets, expenses, incomes, chat_histories)
     # 시간측정
     retrieval_elapsed = time.time() - start
 
     # 프롬프트 생성
-    prompt = build_prompt(question, summaries, docs, histories)
+    prompt = build_prompt(question, summaries, budgets, expenses, incomes, histories)
 
     # 시간 측정
     gen_start = time.time()
