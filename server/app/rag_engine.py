@@ -466,6 +466,12 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     save_chat_history(uid, question, answer, "general")
 
     # 답변 반환
+    docs = []
+    docs.append(summaries)
+    docs.append(budgets)
+    docs.append(expenses)
+    docs.append(incomes)
+    docs.append(chat_histories)
     return {
         "answer": answer,
         "references": [doc["id"] for doc in docs],
