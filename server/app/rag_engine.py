@@ -467,11 +467,11 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
 
     # 답변 반환
     docs = []
-    docs.append(summaries)
-    docs.append(budgets)
-    docs.append(expenses)
-    docs.append(incomes)
-    docs.append(chat_histories)
+    docs.extend(summaries)
+    docs.extend(budgets)
+    docs.extend(expenses)
+    docs.extend(incomes)
+    docs.extend(chat_histories)
     return {
         "answer": answer,
         "references": [doc["id"] for doc in docs],
