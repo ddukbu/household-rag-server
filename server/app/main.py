@@ -105,7 +105,14 @@ def init_profile(profile: SignUpProfile, uid: str = Depends(verify_firebase_toke
 # 지출
 @app.get("/expenses", response_model=List[Expense])
 def get_expenses(uid: str = Depends(verify_firebase_token)):
-    docs = db.collection("users").document(uid).collection("expenses").stream()
+    docs = 
+    db.collection("users")
+    .document(uid)
+    .collection("expenses")
+    .order_by("date")
+    .order_by("time")
+    .stream()
+
     expenses = []
 
     for doc in docs:
@@ -219,7 +226,14 @@ def delete_expense(expense_id: str, uid: str = Depends(verify_firebase_token)):
 # 수익
 @app.get("/Incomes", response_model=List[Income])
 def get_Incomes(uid: str = Depends(verify_firebase_token)):
-    docs = db.collection("users").document(uid).collection("Incomes").stream()
+    docs = 
+    db.collection("users")
+    .document(uid)
+    .collection("Incomes")
+    .order_by("date")
+    .order_by("time")
+    .stream()
+
     incomes = []
 
     for doc in docs:
@@ -309,7 +323,13 @@ def delete_Income(income_id: str, uid: str = Depends(verify_firebase_token)):
 # 월별 요약본
 @app.get("/summaries", response_model=List[Summary])
 def get_summary(uid: str = Depends(verify_firebase_token)):
-    docs = db.collection("users").document(uid).collection("summaries").stream()
+    docs = 
+    db.collection("users")
+    .document(uid)
+    .collection("summaries")
+    .order_by("year_month")
+    .stream()
+
     summaries = []
     for doc in docs:
         data = doc.to_dict()
