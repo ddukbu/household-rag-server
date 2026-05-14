@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from app.firebase_client import get_firestore_client
-from app.llm_client import call_gemini
+from app.llm_client import call_gemini, call_embed_api
 from app.rag_utils import load_chat_history, retrieve_relevant_chat_history, save_chat_history
 
 db = get_firestore_client()
@@ -422,6 +422,9 @@ def get_budget_if_exists(uid: str, year_month: str) -> Optional[Dict[str, Any]]:
 
 
 def create_empty_budget(uid: str, year_month: str) -> Dict[str, Any]:
+    text = f"{year_month}"
+    embedding = call_embed_api(text)
+
     data = {
         "year_month": year_month,
         "saving": 0,
@@ -431,6 +434,7 @@ def create_empty_budget(uid: str, year_month: str) -> Dict[str, Any]:
         "state": "good",
         "created_by": "user",
         "updated_at": datetime.utcnow().isoformat(),
+        "embedding": embedding,
     }
 
     budget_ref(uid, year_month).set(data, merge=True)
@@ -544,11 +548,15 @@ def load_or_create_budget(uid: str, year_month: str) -> Dict[str, Any]:
     previous_budget = get_budget_if_exists(uid, previous_year_month)
 
     if previous_budget is not None and previous_budget.get("budget_details"):
-        return carry_over_budget_raw(
+        new_budget = carry_over_budget_raw(
             uid=uid,
             from_year_month=previous_year_month,
             to_year_month=year_month
         )
+        text = f"{year_month}"
+        embedding = call_embed_api(text)
+        new_budget["embedding"] = embedding
+        return new_budget
 
     return create_empty_budget(uid, year_month)
 
