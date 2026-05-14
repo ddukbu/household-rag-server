@@ -117,6 +117,7 @@ def load_budgets(uid: str) -> List[Dict[str, Any]]:
         db.collection("users")
         .document(uid)
         .collection("budgets")
+        .order_by("year_month")
         .stream()
     )
 

@@ -353,9 +353,18 @@ def ask_api(request: AskRequest, uid: str = Depends(verify_firebase_token)):
 
 @app.post("/analysis")
 def analyze_spending(
+    request: AskRequest,
     uid: str = Depends(verify_firebase_token)
 ):
-    question = "최근 카테고리별 소비 패턴을 분석해줘."
+    question = f"""
+특수 버튼 : 분석
+
+최근 카테고리별 소비 패턴을 분석해줘.
+
+추가 사용자 요청:
+{request.question}
+"""
+
     return answer_question(uid, question)
 
 
