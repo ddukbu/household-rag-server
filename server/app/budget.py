@@ -147,25 +147,51 @@ def load_budget(uid: str, year_month: str) -> Dict[str, Any]:
 def load_fixed_incomes(uid: str, year_month: str) -> List[Dict[str, Any]]:
     docs = fixed_incomes_ref(uid, year_month).stream()
 
-    return [
-        {
+    actual_details = load_actual_fixed_income_details(uid, year_month)
+
+    result = []
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        plan_amount = data.get("amount", 0)
+        actual_amount = actual_details.get(category, 0)
+
+        result.append({
             "id": doc.id,
-            **doc.to_dict()
-        }
-        for doc in docs
-    ]
+            **data,
+            "actual_amount": actual_amount,
+            "remaining_amount": plan_amount - actual_amount,
+            "status": get_fixed_budget_status(plan_amount, actual_amount),
+        })
+
+    return result
 
 
 def load_fixed_expenses(uid: str, year_month: str) -> List[Dict[str, Any]]:
     docs = fixed_expenses_ref(uid, year_month).stream()
 
-    return [
-        {
+    actual_details = load_actual_fixed_expense_details(uid, year_month)
+
+    result = []
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        plan_amount = data.get("amount", 0)
+        actual_amount = actual_details.get(category, 0)
+
+        result.append({
             "id": doc.id,
-            **doc.to_dict()
-        }
-        for doc in docs
-    ]
+            **data,
+            "actual_amount": actual_amount,
+            "remaining_amount": plan_amount - actual_amount,
+            "status": get_fixed_budget_status(plan_amount, actual_amount),
+        })
+
+    return result
 
 
 def load_summary(uid: str, year_month: str) -> Dict[str, Any]:
@@ -175,6 +201,64 @@ def load_summary(uid: str, year_month: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Summary not found")
 
     return doc.to_dict()
+
+
+def load_actual_fixed_income_details(uid: str, year_month: str) -> Dict[str, int]:
+
+    start_date = f"{year_month}-01"
+    end_date = f"{year_month}-31"
+
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("Incomes")
+        .where("date", ">=", start_date)
+        .where("date", "<=", end_date)
+        .where("is_fixed_income", "==", True)
+        .stream()
+    )
+
+    result = {}
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        amount = data.get("amount", 0)
+
+        result[category] = result.get(category, 0) + amount
+
+    return result
+
+
+def load_actual_fixed_expense_details(uid: str, year_month: str) -> Dict[str, int]:
+
+    start_date = f"{year_month}-01"
+    end_date = f"{year_month}-31"
+
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("expenses")
+        .where("date", ">=", start_date)
+        .where("date", "<=", end_date)
+        .where("is_fixed_expense", "==", True)
+        .stream()
+    )
+
+    result = {}
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        amount = data.get("amount", 0)
+
+        result[category] = result.get(category, 0) + amount
+
+    return result
+
+
 
 
 # =========================
@@ -306,6 +390,17 @@ def refresh_total_budget(uid: str, year_month: str) -> Dict[str, Any]:
     budget_ref(uid, year_month).set(update_data, merge=True)
 
     return load_budget(uid, year_month)
+
+
+def get_fixed_budget_status(plan_amount: int, actual_amount: int) -> str:
+    if actual_amount <= 0:
+        return "pending"
+    elif actual_amount < plan_amount:
+        return "partial"
+    elif actual_amount == plan_amount:
+        return "done"
+    else:
+        return "over"
 
 
 # =========================
