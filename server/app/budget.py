@@ -392,6 +392,55 @@ def refresh_total_budget(uid: str, year_month: str) -> Dict[str, Any]:
     return load_budget(uid, year_month)
 
 
+#만약 고정 지출/수입의 CRUD 과정중, 전체 예산 카테고리의 합이 가용 예산 금액을 초과할 경우, 모든 예산 카테고리를 0으로 초기화.
+def check_over_allocation_and_refresh(uid: str, year_month: str) -> Dict[str, Any]:
+    budget = load_budget(uid, year_month)
+    saving = budget.get("saving", 0)
+    budget_details = budget.get("budget_details", {})
+
+    try:
+        summary = load_summary(uid, year_month)
+        variable_expense_details = summary.get("variable_expense_details", {})
+    except HTTPException:
+        variable_expense_details = {}
+
+    # summary의 변동 지출 카테고리가 budget_details에 없으면 0원으로 추가
+    for category in variable_expense_details.keys():
+        if category not in budget_details:
+            budget_details[category] = 0
+
+    total_budget = calculate_total_budget(uid, year_month, saving)
+
+    if sum(budget_details.values()) > total_budget:
+        budget_details = reset_budget_details_to_zero(budget_details)
+
+    remaining_budget_details = calculate_remaining_budget_details(
+        uid=uid,
+        year_month=year_month,
+        total_budget=total_budget,
+        budget_details=budget_details
+    )
+
+    state = calculate_budget_state(
+        saving=saving,
+        remaining_budget_details=remaining_budget_details
+    )
+
+    update_data = {
+        "year_month": year_month,
+        "saving": saving,
+        "total_budget": total_budget,
+        "budget_details": budget_details,
+        "remaining_budget_details": remaining_budget_details,
+        "state": state,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    budget_ref(uid, year_month).set(update_data, merge=True)
+
+    return load_budget(uid, year_month)
+
+
 def get_fixed_budget_status(plan_amount: int, actual_amount: int) -> str:
     if actual_amount <= 0:
         return "pending"
@@ -401,6 +450,14 @@ def get_fixed_budget_status(plan_amount: int, actual_amount: int) -> str:
         return "done"
     else:
         return "over"
+    
+
+#reset every budget_details to zero    
+def reset_budget_details_to_zero(budget_details: Dict[str, int]) -> Dict[str, int]:
+    return {
+        category: 0
+        for category in budget_details.keys()
+    }
 
 
 # =========================
@@ -665,7 +722,7 @@ def create_fixed_income(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_incomes = load_fixed_incomes(uid, year_month)
 
     return {
@@ -694,7 +751,7 @@ def update_fixed_income(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_incomes = load_fixed_incomes(uid, year_month)
 
     return {
@@ -723,7 +780,7 @@ def delete_fixed_income(
 
     doc_ref.delete()
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_incomes = load_fixed_incomes(uid, year_month)
 
     return {
@@ -753,7 +810,7 @@ def create_fixed_expense(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
 
     return {
@@ -782,7 +839,7 @@ def update_fixed_expense(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
 
     return {
@@ -811,7 +868,7 @@ def delete_fixed_expense(
 
     doc_ref.delete()
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
 
     return {
