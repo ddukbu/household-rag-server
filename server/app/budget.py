@@ -392,7 +392,7 @@ def refresh_total_budget(uid: str, year_month: str) -> Dict[str, Any]:
     return load_budget(uid, year_month)
 
 
-#만약 고정 지출/수입의 CRUD 과정중, 전체 예산 카테고리의 합이 가용 예산 금액을 초과할 경우, 모든 예산 카테고리를 0으로 초기화.
+#만약 예산안에 설정하는 고정 지출/수입의 CRUD 과정중, 전체 예산 카테고리의 합이 가용 예산 금액을 초과할 경우, 모든 예산 카테고리를 0으로 초기화.
 def check_over_allocation_and_refresh(uid: str, year_month: str) -> Dict[str, Any]:
     budget = load_budget(uid, year_month)
     saving = budget.get("saving", 0)
