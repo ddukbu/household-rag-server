@@ -151,11 +151,18 @@ def load_summaries(uid: str) -> List[Dict[str, Any]]:
 def load_asset_status(uid: str) -> Dict[str, Any]:
     doc = asset_ref(uid).get()
 
+    #만약 사용자가 처음 이번달 자산을 로드시, 0을 기본값으로 설정
     if not doc.exists:
-        raise HTTPException(
-            status_code=404,
-            detail="초기 자산이 설정되지 않았습니다."
-        )
+        #raise HTTPException(
+        #    status_code=404,
+        #    detail="초기 자산이 설정되지 않았습니다."
+        #)
+        data = {
+            "initial_asset": 0,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        asset_ref(uid).set(data, merge=True)
+        doc = asset_ref(uid).get()
 
     data = doc.to_dict()
 

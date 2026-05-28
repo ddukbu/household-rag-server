@@ -147,25 +147,51 @@ def load_budget(uid: str, year_month: str) -> Dict[str, Any]:
 def load_fixed_incomes(uid: str, year_month: str) -> List[Dict[str, Any]]:
     docs = fixed_incomes_ref(uid, year_month).stream()
 
-    return [
-        {
+    actual_details = load_actual_fixed_income_details(uid, year_month)
+
+    result = []
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        plan_amount = data.get("amount", 0)
+        actual_amount = actual_details.get(category, 0)
+
+        result.append({
             "id": doc.id,
-            **doc.to_dict()
-        }
-        for doc in docs
-    ]
+            **data,
+            "actual_amount": actual_amount,
+            "remaining_amount": plan_amount - actual_amount,
+            "status": get_fixed_budget_status(plan_amount, actual_amount),
+        })
+
+    return result
 
 
 def load_fixed_expenses(uid: str, year_month: str) -> List[Dict[str, Any]]:
     docs = fixed_expenses_ref(uid, year_month).stream()
 
-    return [
-        {
+    actual_details = load_actual_fixed_expense_details(uid, year_month)
+
+    result = []
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        plan_amount = data.get("amount", 0)
+        actual_amount = actual_details.get(category, 0)
+
+        result.append({
             "id": doc.id,
-            **doc.to_dict()
-        }
-        for doc in docs
-    ]
+            **data,
+            "actual_amount": actual_amount,
+            "remaining_amount": plan_amount - actual_amount,
+            "status": get_fixed_budget_status(plan_amount, actual_amount),
+        })
+
+    return result
 
 
 def load_summary(uid: str, year_month: str) -> Dict[str, Any]:
@@ -175,6 +201,64 @@ def load_summary(uid: str, year_month: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Summary not found")
 
     return doc.to_dict()
+
+
+def load_actual_fixed_income_details(uid: str, year_month: str) -> Dict[str, int]:
+
+    start_date = f"{year_month}-01"
+    end_date = f"{year_month}-31"
+
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("Incomes")
+        .where("date", ">=", start_date)
+        .where("date", "<=", end_date)
+        .where("is_fixed_income", "==", True)
+        .stream()
+    )
+
+    result = {}
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        amount = data.get("amount", 0)
+
+        result[category] = result.get(category, 0) + amount
+
+    return result
+
+
+def load_actual_fixed_expense_details(uid: str, year_month: str) -> Dict[str, int]:
+
+    start_date = f"{year_month}-01"
+    end_date = f"{year_month}-31"
+
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("expenses")
+        .where("date", ">=", start_date)
+        .where("date", "<=", end_date)
+        .where("is_fixed_expense", "==", True)
+        .stream()
+    )
+
+    result = {}
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        category = data.get("category", "")
+        amount = data.get("amount", 0)
+
+        result[category] = result.get(category, 0) + amount
+
+    return result
+
+
 
 
 # =========================
@@ -306,6 +390,74 @@ def refresh_total_budget(uid: str, year_month: str) -> Dict[str, Any]:
     budget_ref(uid, year_month).set(update_data, merge=True)
 
     return load_budget(uid, year_month)
+
+
+#만약 예산안에 설정하는 고정 지출/수입의 CRUD 과정중, 전체 예산 카테고리의 합이 가용 예산 금액을 초과할 경우, 모든 예산 카테고리를 0으로 초기화.
+def check_over_allocation_and_refresh(uid: str, year_month: str) -> Dict[str, Any]:
+    budget = load_budget(uid, year_month)
+    saving = budget.get("saving", 0)
+    budget_details = budget.get("budget_details", {})
+
+    try:
+        summary = load_summary(uid, year_month)
+        variable_expense_details = summary.get("variable_expense_details", {})
+    except HTTPException:
+        variable_expense_details = {}
+
+    # summary의 변동 지출 카테고리가 budget_details에 없으면 0원으로 추가
+    for category in variable_expense_details.keys():
+        if category not in budget_details:
+            budget_details[category] = 0
+
+    total_budget = calculate_total_budget(uid, year_month, saving)
+
+    if sum(budget_details.values()) > total_budget:
+        budget_details = reset_budget_details_to_zero(budget_details)
+
+    remaining_budget_details = calculate_remaining_budget_details(
+        uid=uid,
+        year_month=year_month,
+        total_budget=total_budget,
+        budget_details=budget_details
+    )
+
+    state = calculate_budget_state(
+        saving=saving,
+        remaining_budget_details=remaining_budget_details
+    )
+
+    update_data = {
+        "year_month": year_month,
+        "saving": saving,
+        "total_budget": total_budget,
+        "budget_details": budget_details,
+        "remaining_budget_details": remaining_budget_details,
+        "state": state,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    budget_ref(uid, year_month).set(update_data, merge=True)
+
+    return load_budget(uid, year_month)
+
+
+def get_fixed_budget_status(plan_amount: int, actual_amount: int) -> str:
+    if actual_amount <= 0:
+        return "pending"
+    elif actual_amount < plan_amount:
+        return "partial"
+    elif actual_amount == plan_amount:
+        return "done"
+    else:
+        return "over"
+    
+
+#reset every budget_details to zero    
+def reset_budget_details_to_zero(budget_details: Dict[str, int]) -> Dict[str, int]:
+    return {
+        category: 0
+        for category in budget_details.keys()
+    }
 
 
 # =========================
@@ -578,7 +730,7 @@ def create_fixed_income(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_incomes = load_fixed_incomes(uid, year_month)
 
     return {
@@ -607,7 +759,7 @@ def update_fixed_income(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_incomes = load_fixed_incomes(uid, year_month)
 
     return {
@@ -636,7 +788,7 @@ def delete_fixed_income(
 
     doc_ref.delete()
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_incomes = load_fixed_incomes(uid, year_month)
 
     return {
@@ -666,7 +818,7 @@ def create_fixed_expense(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
 
     return {
@@ -695,7 +847,7 @@ def update_fixed_expense(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
 
     return {
@@ -724,7 +876,7 @@ def delete_fixed_expense(
 
     doc_ref.delete()
 
-    budget = refresh_total_budget(uid, year_month)
+    budget = check_over_allocation_and_refresh(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
 
     return {

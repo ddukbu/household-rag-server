@@ -586,12 +586,41 @@ def update_fixed_income_api(
     request: FixedIncomeBudget,
     uid: str = Depends(verify_firebase_token)
 ):
-    return update_fixed_income(
+    doc_ref = (
+        db.collection("users")
+        .document(uid)
+        .collection("budgets")
+        .document(year_month)
+        .collection("fixedIncomes")
+        .document(fixed_income_id)
+    )
+
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Fixed income not found")
+
+    old_category = doc.to_dict().get("category", "")
+
+    deleted_actual_count = 0
+
+    if old_category and old_category != request.category:
+        deleted_actual_count = delete_actual_fixed_incomes_by_category(
+            uid=uid,
+            year_month=year_month,
+            category=old_category
+        )
+
+    result = update_fixed_income(
         uid=uid,
         year_month=year_month,
         fixed_income_id=fixed_income_id,
         fixed_income=request
     )
+
+    result["deleted_actual_fixed_income_count"] = deleted_actual_count
+
+    return result
 
 
 @app.delete("/budgets/{year_month}/fixed-incomes/{fixed_income_id}")
@@ -600,11 +629,40 @@ def delete_fixed_income_api(
     fixed_income_id: str,
     uid: str = Depends(verify_firebase_token)
 ):
-    return delete_fixed_income(
+    doc_ref = (
+        db.collection("users")
+        .document(uid)
+        .collection("budgets")
+        .document(year_month)
+        .collection("fixedIncomes")
+        .document(fixed_income_id)
+    )
+
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Fixed income not found")
+
+    old_category = doc.to_dict().get("category", "")
+
+    deleted_actual_count = 0
+
+    if old_category:
+        deleted_actual_count = delete_actual_fixed_incomes_by_category(
+            uid=uid,
+            year_month=year_month,
+            category=old_category
+        )
+
+    result = delete_fixed_income(
         uid=uid,
         year_month=year_month,
         fixed_income_id=fixed_income_id
     )
+
+    result["deleted_actual_fixed_income_count"] = deleted_actual_count
+
+    return result
 
 
 # =========================
@@ -639,12 +697,41 @@ def update_fixed_expense_api(
     request: FixedExpenseBudget,
     uid: str = Depends(verify_firebase_token)
 ):
-    return update_fixed_expense(
+    doc_ref = (
+        db.collection("users")
+        .document(uid)
+        .collection("budgets")
+        .document(year_month)
+        .collection("fixedExpenses")
+        .document(fixed_expense_id)
+    )
+
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Fixed expense not found")
+
+    old_category = doc.to_dict().get("category", "")
+
+    deleted_actual_count = 0
+
+    if old_category and old_category != request.category:
+        deleted_actual_count = delete_actual_fixed_expenses_by_category(
+            uid=uid,
+            year_month=year_month,
+            category=old_category
+        )
+
+    result = update_fixed_expense(
         uid=uid,
         year_month=year_month,
         fixed_expense_id=fixed_expense_id,
         fixed_expense=request
     )
+
+    result["deleted_actual_fixed_expense_count"] = deleted_actual_count
+
+    return result
 
 
 @app.delete("/budgets/{year_month}/fixed-expenses/{fixed_expense_id}")
@@ -653,8 +740,105 @@ def delete_fixed_expense_api(
     fixed_expense_id: str,
     uid: str = Depends(verify_firebase_token)
 ):
-    return delete_fixed_expense(
+    doc_ref = (
+        db.collection("users")
+        .document(uid)
+        .collection("budgets")
+        .document(year_month)
+        .collection("fixedExpenses")
+        .document(fixed_expense_id)
+    )
+
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Fixed expense not found")
+
+    old_category = doc.to_dict().get("category", "")
+
+    deleted_actual_count = 0
+
+    if old_category:
+        deleted_actual_count = delete_actual_fixed_expenses_by_category(
+            uid=uid,
+            year_month=year_month,
+            category=old_category
+        )
+
+    result = delete_fixed_expense(
         uid=uid,
         year_month=year_month,
         fixed_expense_id=fixed_expense_id
     )
+
+    result["deleted_actual_fixed_expense_count"] = deleted_actual_count
+
+    return result
+    
+    
+# =========================
+# Additional Functions
+# =========================
+
+def delete_actual_fixed_incomes_by_category(
+    uid: str,
+    year_month: str,
+    category: str
+) -> int:
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("Incomes")
+        .where("date", ">=", f"{year_month}-01")
+        .where("date", "<=", f"{year_month}-31")
+        .where("is_fixed_income", "==", True)
+        .where("category", "==", category)
+        .stream()
+    )
+
+    deleted_count = 0
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        income_in = IncomeIn(
+            **{k: v for k, v in data.items() if k in IncomeIn.__fields__}
+        )
+
+        process_expense_change(uid, income_in, mode="delete")
+        doc.reference.delete()
+        deleted_count += 1
+
+    return deleted_count
+
+
+def delete_actual_fixed_expenses_by_category(
+    uid: str,
+    year_month: str,
+    category: str
+) -> int:
+    docs = (
+        db.collection("users")
+        .document(uid)
+        .collection("expenses")
+        .where("date", ">=", f"{year_month}-01")
+        .where("date", "<=", f"{year_month}-31")
+        .where("is_fixed_expense", "==", True)
+        .where("category", "==", category)
+        .stream()
+    )
+
+    deleted_count = 0
+
+    for doc in docs:
+        data = doc.to_dict()
+
+        expense_in = ExpenseIn(
+            **{k: v for k, v in data.items() if k in ExpenseIn.__fields__}
+        )
+
+        process_expense_change(uid, expense_in, mode="delete")
+        doc.reference.delete()
+        deleted_count += 1
+
+    return deleted_count
