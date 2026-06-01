@@ -48,6 +48,7 @@ class ExpenseIn(BaseModel):
     payment_method: str     # 결제방법
     place: str              # 사용처
     memo: str               # 메모
+    fixed_item_id: str = "" # 예산안 고정 지출의 id (임베딩에 포함되지 않음)
 
 class IncomeIn(BaseModel):
     date: str               # 날짜
@@ -58,6 +59,7 @@ class IncomeIn(BaseModel):
     deposit_method: str     # 입금방법
     deposit_source: str     # 입금처
     memo: str               # 메모
+    fixed_item_id: str = "" # 예산안 고정 수입의 id (고정이 아닐 경우 "" 기본값)
 
 def create_sentence(data: Dict[str, Any]) -> str:
     # 고정 지출 여부에 따른 텍스트 변환

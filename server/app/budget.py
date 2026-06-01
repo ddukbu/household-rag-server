@@ -18,13 +18,13 @@ db = get_firestore_client()
 # =========================
 
 class FixedIncomeBudget(BaseModel):
-    category: str
+    category: str      # 예: 월급, 용돈, 기타
     amount: int
     memo: str = ""
 
 
 class FixedExpenseBudget(BaseModel):
-    category: str
+    category: str      # 예: 월세, 보험료, 생활
     amount: int
     memo: str = ""
 
@@ -147,23 +147,19 @@ def load_budget(uid: str, year_month: str) -> Dict[str, Any]:
 def load_fixed_incomes(uid: str, year_month: str) -> List[Dict[str, Any]]:
     docs = fixed_incomes_ref(uid, year_month).stream()
 
-    actual_details = load_actual_fixed_income_details(uid, year_month)
-
     result = []
 
     for doc in docs:
         data = doc.to_dict()
 
-        category = data.get("category", "")
-        plan_amount = data.get("amount", 0)
-        actual_amount = actual_details.get(category, 0)
-
         result.append({
             "id": doc.id,
             **data,
-            "actual_amount": actual_amount,
-            "remaining_amount": plan_amount - actual_amount,
-            "status": get_fixed_budget_status(plan_amount, actual_amount),
+            "is_recorded": is_fixed_income_recorded(
+                uid=uid,
+                year_month=year_month,
+                fixed_income_id=doc.id
+            )
         })
 
     return result
@@ -172,23 +168,19 @@ def load_fixed_incomes(uid: str, year_month: str) -> List[Dict[str, Any]]:
 def load_fixed_expenses(uid: str, year_month: str) -> List[Dict[str, Any]]:
     docs = fixed_expenses_ref(uid, year_month).stream()
 
-    actual_details = load_actual_fixed_expense_details(uid, year_month)
-
     result = []
 
     for doc in docs:
         data = doc.to_dict()
 
-        category = data.get("category", "")
-        plan_amount = data.get("amount", 0)
-        actual_amount = actual_details.get(category, 0)
-
         result.append({
             "id": doc.id,
             **data,
-            "actual_amount": actual_amount,
-            "remaining_amount": plan_amount - actual_amount,
-            "status": get_fixed_budget_status(plan_amount, actual_amount),
+            "is_recorded": is_fixed_expense_recorded(
+                uid=uid,
+                year_month=year_month,
+                fixed_expense_id=doc.id
+            )
         })
 
     return result
@@ -203,62 +195,57 @@ def load_summary(uid: str, year_month: str) -> Dict[str, Any]:
     return doc.to_dict()
 
 
-def load_actual_fixed_income_details(uid: str, year_month: str) -> Dict[str, int]:
+# =========================
+# Get/Find functions
+# =========================
 
-    start_date = f"{year_month}-01"
-    end_date = f"{year_month}-31"
 
+def get_fixed_income_marker(fixed_income_id: str) -> str:
+    return f"#FIXED_INCOME_ID={fixed_income_id}"
+
+
+def get_fixed_expense_marker(fixed_expense_id: str) -> str:
+    return f"#FIXED_EXPENSE_ID={fixed_expense_id}"
+
+
+def is_fixed_income_recorded(
+    uid: str,
+    year_month: str,
+    fixed_income_id: str
+) -> bool:
     docs = (
         db.collection("users")
         .document(uid)
         .collection("Incomes")
-        .where("date", ">=", start_date)
-        .where("date", "<=", end_date)
+        .where("date", ">=", f"{year_month}-01")
+        .where("date", "<=", f"{year_month}-31")
         .where("is_fixed_income", "==", True)
+        .where("fixed_item_id", "==", fixed_income_id)
+        .limit(1)
         .stream()
     )
 
-    result = {}
-
-    for doc in docs:
-        data = doc.to_dict()
-
-        category = data.get("category", "")
-        amount = data.get("amount", 0)
-
-        result[category] = result.get(category, 0) + amount
-
-    return result
+    return any(True for _ in docs)
 
 
-def load_actual_fixed_expense_details(uid: str, year_month: str) -> Dict[str, int]:
-
-    start_date = f"{year_month}-01"
-    end_date = f"{year_month}-31"
-
+def is_fixed_expense_recorded(
+    uid: str,
+    year_month: str,
+    fixed_expense_id: str
+) -> bool:
     docs = (
         db.collection("users")
         .document(uid)
         .collection("expenses")
-        .where("date", ">=", start_date)
-        .where("date", "<=", end_date)
+        .where("date", ">=", f"{year_month}-01")
+        .where("date", "<=", f"{year_month}-31")
         .where("is_fixed_expense", "==", True)
+        .where("fixed_item_id", "==", fixed_expense_id)
+        .limit(1)
         .stream()
     )
 
-    result = {}
-
-    for doc in docs:
-        data = doc.to_dict()
-
-        category = data.get("category", "")
-        amount = data.get("amount", 0)
-
-        result[category] = result.get(category, 0) + amount
-
-    return result
-
-
+    return any(True for _ in docs)
 
 
 # =========================
@@ -439,17 +426,6 @@ def check_over_allocation_and_refresh(uid: str, year_month: str) -> Dict[str, An
     budget_ref(uid, year_month).set(update_data, merge=True)
 
     return load_budget(uid, year_month)
-
-
-def get_fixed_budget_status(plan_amount: int, actual_amount: int) -> str:
-    if actual_amount <= 0:
-        return "pending"
-    elif actual_amount < plan_amount:
-        return "partial"
-    elif actual_amount == plan_amount:
-        return "done"
-    else:
-        return "over"
     
 
 #reset every budget_details to zero    
