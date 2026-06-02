@@ -163,7 +163,7 @@ def process_expense_change(uid: str, data: Union[ExpenseIn, IncomeIn], mode: str
         )
 
     updated_summary = update_summary(summary, data, mode)
-    doc_ref.set(updated_summary.dict(), merge=True)
+    doc_ref.set(updated_summary.dict())
 
 
 #기존 call_embed_api를 llm_client.py로 이동.
