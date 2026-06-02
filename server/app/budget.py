@@ -1017,7 +1017,6 @@ def recommend_budget_with_ai(
 - 너는 이미 계산된 [예산 가용 금액]을 변동 지출 카테고리별로 나누면 된다.
 - 이 응답은 임시 예산안이다. 사용자가 확인하기 전까지 실제 예산안으로 적용되지 않는다.
 
-
 [예산 추천 유형별 프롬프트]
 {mode_instruction}
 
@@ -1054,12 +1053,30 @@ def recommend_budget_with_ai(
 [사용 가능한 변동 지출 카테고리]
 {variable_categories}
 
-반드시 아래 JSON 형식으로만 답해라.
-JSON 바깥에 설명 문장을 절대 쓰지 마라.
+----------------------------------------------------------------------
+[출력 형식 및 작성 가이드라인]
+반드시 아래 지정된 JSON 형식으로만 답해라. JSON 바깥에 설명 문장을 절대 쓰지 마라.
+
+특히 "message" 필드는 사용자가 화면에서 읽을 최종 텍스트이므로, 아래 규칙을 반드시 준수하여 작성해라:
+1. JSON이나 백슬래시(\n)가 그대로 노출되는 듯한 개발용 텍스트를 절대 포함하지 마라.
+2. 기획서 UI에 맞게 직관적이고 친절한 한글 문장과 이모지(📌, ➔)를 사용하여 단락을 나누어 작성해라.
+3. "message" 작성 포맷 예시 (아래 서식을 참고하여 실제 데이터 수치를 대입해 작성할 것):
+   [모드이름] 추천
+   
+   📌 최근 [카테고리명] 사용량 변화 내용 (예: 최근 식비 사용량 증가(+32%))
+   📌 [카테고리명] 예산 여유 상태 (예: 교통비 예산 여유 있음(-40%))
+   📌 목표 저축액 관련 코멘트
+   
+   ➔ [카테고리명] 예산 [+/-금액]원
+   ➔ [카테고리명] 예산 [+/-금액]원
+   
+   해당 내용으로 예산안을 적용할까요?
+
+----------------------------------------------------------------------
 
 {{
   "type": "budget_recommendation",
-  "message": "사용자에게 보여줄 예산 추천 설명",
+  "message": "위 가이드라인의 3번 포맷을 기반으로 작성된 친절하고 직관적인 설명 텍스트",
   "year_month": "{year_month}",
   "saving": {saving},
   "total_budget": {total_budget},
@@ -1077,7 +1094,7 @@ JSON 바깥에 설명 문장을 절대 쓰지 마라.
 6. 현재 산정된 예산안이 비어 있지 않다면, 기존 예산안을 참고하여 더 현실적인 방향으로 조정해라.
 7. 현재 예산안이 비어 있다면, 실제 변동 지출 기록을 기준으로 새 예산안을 만들어라.
 """
-
+    
     answer = call_gemini(prompt)
     return parse_ai_budget_response(answer)
 
@@ -1149,12 +1166,6 @@ def create_budget_draft(
 
     answer_text = f"""
     {draft_data["message"]}
-
-    추천 예산안:
-    {json.dumps(draft_data["budget_details"], ensure_ascii=False, indent=2)}
-
-    남은 예산:
-    {json.dumps(draft_data["remaining_budget_details"], ensure_ascii=False, indent=2)}
     """.strip()
 
     save_chat_history(
@@ -1218,15 +1229,12 @@ def apply_budget_draft(
     # 적용 후 draft 삭제
     budget_draft_ref(uid, year_month).delete()
 
+    result = "\n".join([f"✅{key} 예산: {value}원" for key, value in budget_details.items()])
     answer_text = f"""
 AI 추천 예산안이 실제 예산안으로 적용되었습니다.
-
 적용된 예산안:
-{json.dumps(budget_details, ensure_ascii=False, indent=2)}
-
-남은 예산:
-{json.dumps(remaining_budget_details, ensure_ascii=False, indent=2)}
-""".strip()
+{result}
+"""
 
     save_chat_history(
         uid=uid,
@@ -1236,7 +1244,7 @@ AI 추천 예산안이 실제 예산안으로 적용되었습니다.
     )
 
     return {
-        "message": "AI 추천 예산안이 실제 예산안으로 적용되었습니다.",
+        "message": answer_text,
         "budget": load_budget(uid, year_month)
     }
 
