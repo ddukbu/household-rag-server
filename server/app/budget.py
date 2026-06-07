@@ -838,6 +838,10 @@ def recommend_budget_with_ai(
     
     try:
         summary = load_summary(uid, year_month)
+        # 지난달 데이터
+        last_data = load_last_month_data(uid, year_month)
+        last_summary = last_data["last_month_summary"]
+        last_expenses = last_data["last_month_expenses"]
     except HTTPException:
         summary = {
             "variable_expense_details": {}
@@ -939,6 +943,10 @@ def recommend_budget_with_ai(
 
 [사용 가능한 변동 지출 카테고리]
 {variable_categories}
+
+[지난달 요약본 및 소비금액]
+{last_summary}
+{last_expenses}
 
 ----------------------------------------------------------------------
 [출력 형식 및 작성 가이드라인]
@@ -1236,3 +1244,61 @@ def recommend_and_save_budget(
         "budget": load_budget(uid, year_month)
     }
 """
+
+def load_last_month_data(uid: str, current_year_month: str) -> Dict[str, Any]:
+    """
+    현재 연월(current_year_month: 'YYYY-MM')을 기준으로 
+    직전 달(지난달)의 요약본 문서와 실제 소비 내역 리스트를 동시에 로드하여 반환합니다.
+    """
+    # 1. 날짜 연산: "2026-06" -> 1달 전인 "2026-05" 계산
+    try:
+        current_date = datetime.strptime(current_year_month, "%Y-%m")
+        last_date = current_date - relativedelta(months=1)
+        last_year_month = last_date.strftime("%Y-%m")  # 예: "2026-05"
+    except ValueError:
+        # 날짜 형식이 잘못 들어온 경우 방어 처리
+        return {"last_month_summary": {}, "last_month_expenses": []}
+
+    # Base 레퍼런스 정의
+    user_doc_ref = db.collection("users").document(uid)
+
+    # ------------------------------------------------------------------
+    # [파트 1] 지난달 요약본(Summary) 로드
+    # 요약본의 문서 이름(ID)이 year_month와 동일하므로 단일 문서(document) 조회가 가능합니다.
+    # ------------------------------------------------------------------
+    last_summary_doc = user_doc_ref.collection("summaries").document(last_year_month).get()
+    
+    if last_summary_doc.exists:
+        last_month_summary = {
+            "id": last_summary_doc.id,
+            **last_summary_doc.to_dict()
+        }
+    else:
+        last_month_summary = {}
+
+    # ------------------------------------------------------------------
+    # [파트 2] 지난달 소비 내역(Expenses) 로드
+    # date 키의 값이 "2026-05-01" 형식이므로, 지난달 1일(이상)부터 이번달 1일(미만)까지 범위 쿼리를 수행합니다.
+    # ------------------------------------------------------------------
+    start_date_str = f"{last_year_month}-01"              # 예: "2026-05-01"
+    end_date_str = f"{current_year_month}-01"             # 예: "2026-06-01"
+
+    expense_docs = (
+        user_doc_ref.collection("expenses")
+        .where("date", ">=", start_date_str)
+        .where("date", "<", end_date_str)
+        .stream()
+    )
+
+    last_month_expenses = []
+    for doc in expense_docs:
+        last_month_expenses.append({
+            "id": doc.id,
+            **doc.to_dict()
+        })
+
+    # 2. 하나의 딕셔너리 결과물로 패키징하여 반환
+    return {
+        "last_month_summary": last_month_summary,
+        "last_month_expenses": last_month_expenses
+    }
