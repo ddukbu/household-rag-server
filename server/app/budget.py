@@ -840,8 +840,8 @@ def recommend_budget_with_ai(
         summary = load_summary(uid, year_month)
         # 지난달 데이터
         last_data = load_last_month_data(uid, year_month)
-        last_summary = last_data["last_month_summary"]
-        last_expenses = last_data["last_month_expenses"]
+        last_summary = last_data.get("last_month_expenses_details", {})
+        last_expenses = last_data.get("last_month_expenses", [])
     except HTTPException:
         summary = {
             "variable_expense_details": {}
