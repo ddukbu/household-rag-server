@@ -835,18 +835,27 @@ def recommend_budget_with_ai(
     mode: str,
     user_message: str = ""
 ) -> Dict[str, Any]:
-    
+    summary = {"variable_expense_details": {}}
+    last_summary = {}
+    last_expenses = []
+
     try:
         summary = load_summary(uid, year_month)
-        # 지난달 데이터
         last_data = load_last_month_data(uid, year_month)
         last_summary = last_data.get("last_month_expenses_details", {})
         last_expenses = last_data.get("last_month_expenses", [])
+        
+        
     except HTTPException:
-        summary = {
-            "variable_expense_details": {}
-        }
-    
+        pass
+
+    try:
+        summary = load_summary(uid, year_month)
+        # 지난달 데이터
+        
+    except HTTPException:
+        pass
+
     fixed_incomes = load_fixed_incomes(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
     chat_histories = load_chat_history(uid)
