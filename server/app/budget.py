@@ -1268,13 +1268,11 @@ def load_last_month_data(uid: str, current_year_month: str) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     last_summary_doc = user_doc_ref.collection("summaries").document(last_year_month).get()
     
+    last_month_expenses_details = {} 
     if last_summary_doc.exists:
-        last_month_summary = {
-            "id": last_summary_doc.id,
-            **last_summary_doc.to_dict()
-        }
-    else:
-        last_month_summary = {}
+        summary_data = last_summary_doc.to_dict()
+        # + 요약본 데이터에서 'variable_expense_details' 키만 안전하게 추출
+        last_month_expenses_details = summary_data.get("variable_expense_details", {})
 
     # ------------------------------------------------------------------
     # [파트 2] 지난달 소비 내역(Expenses) 로드
@@ -1299,6 +1297,6 @@ def load_last_month_data(uid: str, current_year_month: str) -> Dict[str, Any]:
 
     # 2. 하나의 딕셔너리 결과물로 패키징하여 반환
     return {
-        "last_month_summary": last_month_summary,
+        "last_month_expenses_details": last_month_expenses_details,
         "last_month_expenses": last_month_expenses
     }
