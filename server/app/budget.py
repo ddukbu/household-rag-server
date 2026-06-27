@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from app.firebase_client import get_firestore_client
-from app.llm_client import call_gemini
+from app.llm_client import call_gemini, call_embed_api
 from app.rag_utils import load_chat_history, retrieve_relevant_chat_history, save_chat_history
 
 db = get_firestore_client()
@@ -551,6 +551,9 @@ def get_budget_if_exists(uid: str, year_month: str) -> Optional[Dict[str, Any]]:
 
 
 def create_empty_budget(uid: str, year_month: str) -> Dict[str, Any]:
+    text = f"{year_month}"
+    embedding = call_embed_api(text)
+
     data = {
         "year_month": year_month,
         "saving": 0,
@@ -560,6 +563,7 @@ def create_empty_budget(uid: str, year_month: str) -> Dict[str, Any]:
         "state": "good",
         "created_by": "user",
         "updated_at": datetime.utcnow().isoformat(),
+        "embedding": embedding,
     }
 
     budget_ref(uid, year_month).set(data, merge=True)
@@ -673,11 +677,15 @@ def load_or_create_budget(uid: str, year_month: str) -> Dict[str, Any]:
     previous_budget = get_budget_if_exists(uid, previous_year_month)
 
     if previous_budget is not None and previous_budget.get("budget_details"):
-        return carry_over_budget_raw(
+        new_budget = carry_over_budget_raw(
             uid=uid,
             from_year_month=previous_year_month,
             to_year_month=year_month
         )
+        text = f"{year_month}"
+        embedding = call_embed_api(text)
+        new_budget["embedding"] = embedding
+        return new_budget
 
     return create_empty_budget(uid, year_month)
 
@@ -916,29 +924,22 @@ def parse_ai_budget_response(answer: str) -> Dict[str, Any]:
 def get_budget_mode_instruction(mode: str) -> str:
     if mode == "saving":
         return """
-[예산 성향]
-절약 모드:
-- 최소 저금 금액을 우선 보호한다.
-- 필수 생활비인 식비, 교통비는 너무 무리하게 줄이지 않는다.
-- 쇼핑, 문화생활, 기타 같은 선택 지출은 보수적으로 배정한다.
+[예산 성향: 절약 모드]
+- 성향: 지출을 극단적으로 통제하고 방어적으로 예산을 수립합니다. 필수 생활비를 최소화하여 최종 잔액(미할당 자금)이 최대한 많이 남도록 유도하세요.
+- 할당 가이드: 필수 생활비는 과거 평균의 최대 70% 수준으로 잡고, 선택 지출은 최대한 0원에 가깝게 축소합니다.
 """
     elif mode == "relaxed":
         return """
-[예산 성향]
-여유 모드:
-- 최소 저금 금액은 유지하되 생활 만족도를 고려한다.
-- 식비, 문화생활, 여가성 지출에 조금 더 여유를 둔다.
-- 과도한 절약보다는 실천 가능한 예산을 우선한다.
+[예산 성향: 여유 모드]
+- 성향: 스트레스 없는 현실적인 예산을 수립하여 소비 만족도를 극대화하는 모드입니다.
+- 할당 가이드: 필수 생활비는 평균의 110% 수준으로 넉넉히 잡고, 사용자가 만족감을 느끼는 핵심 여가 카테고리에 예산을 우선 증액 배정합니다.
 """
     else:
         return """
-[예산 성향]
-균형 모드:
-- 기본 생활비와 여가비를 적당히 유지한다.
-- 최근 소비 패턴을 참고하되 과소비 카테고리는 완만하게 조정한다.
-- 일반적인 기본 예산안으로 추천한다.
+[예산 성향: 균형 모드]
+- 성향: 일상적인 삶의 질을 유지하면서도 적당히 균형 잡힌 비상금을 남기는 모드입니다.
+- 할당 가이드: 필수 생활비는 최근 소비 패턴 평균(100%)을 유지하고, 선택 지출은 과거 과소비 카테고리 위주로 10~20% 완만하게 하향 조정합니다.
 """
-
 
 def get_budget_mode_question(mode: str, user_message: str = "") -> str:
     button_text = {
@@ -963,14 +964,20 @@ def recommend_budget_with_ai(
     mode: str,
     user_message: str = ""
 ) -> Dict[str, Any]:
-    
+    summary = {"variable_expense_details": {}}
+    last_summary = {}
+    last_expenses = []
+
     try:
         summary = load_summary(uid, year_month)
+        last_data = load_last_month_data(uid, year_month)
+        last_summary = last_data.get("last_month_expenses_details", {})
+        last_expenses = last_data.get("last_month_expenses", [])
+        
+        
     except HTTPException:
-        summary = {
-            "variable_expense_details": {}
-        }
-    
+        pass
+
     fixed_incomes = load_fixed_incomes(uid, year_month)
     fixed_expenses = load_fixed_expenses(uid, year_month)
     chat_histories = load_chat_history(uid)
@@ -1002,13 +1009,40 @@ def recommend_budget_with_ai(
     prompt = f"""
 너는 사용자의 소비 계획을 도와주는 예산 추천 AI이다.
 
-중요:
-- [월별 요약]은 실제 발생한 수입/지출 통계이다.
-- [예산안용 고정 수입/지출]은 사용자가 예산 계획을 위해 따로 입력한 데이터이다.
+중요 제약 조건:
+- [당월 실시간 변동 지출 기록]은 이번 달(현재 월) 시작 이후 현재까지 사용자가 실제로 지출한 실시간 누적 통계이다. 절대 이를 '지난달' 지출로 오인하지 마라.
 - 가용 예산 계산에는 [예산안용 고정 수입/지출]과 [저축 금액]만 사용한다.
 - 너는 이미 계산된 [예산 가용 금액]을 변동 지출 카테고리별로 나누면 된다.
 - 이 응답은 임시 예산안이다. 사용자가 확인하기 전까지 실제 예산안으로 적용되지 않는다.
 
+[시스템 프롬프트: 지능형 역산(Bottom-up) 예산 수립 가이드라인]
+
+★핵심 연산 메커니즘★:
+1. 모든 모드에서 연산 시작 전에 [미할당 여유 자금]의 비율이나 금액을 먼저 정해두지 마세요.
+2. AI는 아래의 '단계별 예산 차감 프로세스'를 엄격히 준수하여 순서대로 예산을 깎아 나가야 합니다.
+3. 1단계와 2단계 배정이 모두 끝난 후, 【최종적으로 남은 모든 잔액】은 다른 어떤 카테고리(기타 등)에도 절대 임의 분배하지 말고, 오직 [미할당 여유 자금]으로 귀속시켜 연산을 마감하세요. 
+4. 사용자의 추가 요청 사항이 있다면 연산 시 반드시 반영해야 합니다.
+
+★카테고리 누락 방지 및 유지 규칙 (필수)★:
+- [사용 가능한 변동 지출 카테고리] 목록 외에도, [직전 달(지난달) 실제 변동 지출 총액 요약]에 존재하는 모든 카테고리(예: 교통비, 생활비, 쇼핑, 식비 등)는 이번 예산안 결과물(`budget_details`)의 Key값에 무조건 항상 포함**되어야 합니다.
+- 지난달에 존재했던 카테고리의 당월 예산은 절약 모드라 할지라도 최소 0원 이상(또는 당월 실시간 누적 지출액 이상)으로 반드시 설정하여 카테고리 구조를 유지하세요.
+- 만약 사용자 추가 요청에 이를 제거해달라고 할 경우에는 제거 가능합니다.
+
+[단계별 예산 차감 프로세스]
+
+1단계: 필수 생활비 선할당 (최우선순위)
+- 필수 생활비(식비, 교통비)를 현재 선택된 [예산 성향 모드]의 기준에 맞춰 할당하고 [예산 가용 금액]에서 차감합니다.
+- 만약 직전 달(과거)의 전체 소비 내역 데이터가 주어지지 않았다면, [당월 실시간 변동 지출 기록]의 하루 평균 소비 페이스를 계산하여 월말까지의 예상치를 추정하거나, 한국 직장인의 소득 평균에 맞춘 표준 예산을 기준 삼아 추천합니다.
+- ★필수 조건★: 만약 [당월 실시간 변동 지출 기록]에 이미 사용자가 지출한 금액이 있다면, 추천 예산 금액은 반드시 '이미 지출한 금액 이상'으로 배정해야 합니다. 이미 쓴 돈보다 예산을 적게 잡아 마이너스가 나는 것을 절대 금지합니다.
+
+2단계: 선택 지출 카테고리 유연 할당 (차순위 우선순위)
+- 1단계 연산 후 '남은 잔액'을 가지고 쇼핑, 문화, 여가 등의 카테고리 예산을 모드별 규칙에 맞게 능동적으로 책정하고 차감합니다.
+- 임의로 돈을 남기거나 "기타" 카테고리에 몰아주기를 하지 마세요. 필요한 만큼만 현실적으로 할당하세요.
+- 만약 남은 금액이 선택 지출을 주기에 부족하다면, 선택 지출 카테고리의 예산은 AI의 판단하에 과감히 0원으로 축소해야 합니다. 절대 총 가용 금액을 초과하여 배정할 수 없습니다.
+- ★필수 조건★: 절약 모드 등의 이유로 선택 지출을 과감히 0원으로 축소하더라도, [당월 실시간 변동 지출 기록]에 해당 카테고리의 '이미 지출한 누적 금액'이 단 돈 1원이라도 존재한다면, 해당 카테고리의 예산은 최소한 '그 이미 지출한 금액과 동일한 금액'으로 배정해야 합니다. (예: 이미 20,000원을 썼다면 절약 모드여도 0원이 아닌 최소 20,000원을 예산으로 복구해야 마이너스가 나지 않습니다.) 또한, 이전달의 변동 지출의 카테고리들에
+
+3단계: 최종 마감 및 미할당 자금 확정 (최종 프로세스)
+- 1단계와 2단계 카테고리 배정을 모두 마친 후, 남은 최종 금액을 계산하여 가계부 데이터의 '미할당 여유 자금' 항목으로 최종 확정합니다. 임의의 '기타' 카테고리를 생성하여 남은 자돈을 강제로 소진하지 마십시오.
 
 [예산 추천 유형별 프롬프트]
 {mode_instruction}
@@ -1046,12 +1080,37 @@ def recommend_budget_with_ai(
 [사용 가능한 변동 지출 카테고리]
 {variable_categories}
 
-반드시 아래 JSON 형식으로만 답해라.
-JSON 바깥에 설명 문장을 절대 쓰지 마라.
+[지난달 요약본 및 소비금액]
+{last_summary}
+{last_expenses}
+
+----------------------------------------------------------------------
+[출력 형식 및 작성 가이드라인]
+반드시 아래 지정된 JSON 형식으로만 답해라. JSON 바깥에 설명 문장을 절대 쓰지 마라.
+
+특히 "message" 필드는 사용자가 화면에서 읽을 최종 텍스트이므로, 아래 규칙을 반드시 준수하여 작성해라:
+1. JSON이나 백슬래시(\n)가 그대로 노출되는 듯한 개발용 텍스트를 절대 포함하지 마라.
+2. 기획서 UI에 맞게 직관적이고 친절한 한글 문장과 이모지(📌, ➔)를 사용하여 단락을 나누어 작성해라.
+3. "message" 작성을 위한 문맥 텍스트 규칙 (★핵심 위반 방지 조항★):
+   - 대형 과거 통계(지난달 전체 내역)가 제공되지 않고, 며칠 동안의 [당월 실시간 변동 지출 기록]만 존재할 때는 절대로 문장에 "지난달 실제 지출액", "지난달 대비"라는 단어를 사용하지 마세요.
+   - 대신 "이번 달 현재까지의 식비 지출 흐름을 반영하여~" 혹은 "데이터가 부족하여 기본 표준 가이드라인에 따라~"의 형태로 상황에 맞게 유연하게 설명글을 작성해야 합니다.
+
+   작성 포맷 예시:
+   [{mode.upper()} 모드] 추천
+   
+   📌 이번 달 [카테고리명] 현재까지의 지출 흐름 반영 결과 (또는 기본 소비 트렌드 반영 결과)
+   📌 타이트한 지출 통제를 위해 불필요한 선택 지출 예산 제한 상태
+   
+   ➔ [카테고리명] 예산 [금액]원
+   ➔ [카테고리명] 예산 [금액]원
+   
+   해당 내용으로 예산안을 적용할까요?
+
+----------------------------------------------------------------------
 
 {{
   "type": "budget_recommendation",
-  "message": "사용자에게 보여줄 예산 추천 설명",
+  "message": "위 가이드라인의 3번 포맷을 기반으로 작성된 친절하고 직관적인 설명 텍스트",
   "year_month": "{year_month}",
   "saving": {saving},
   "total_budget": {total_budget},
@@ -1064,12 +1123,11 @@ JSON 바깥에 설명 문장을 절대 쓰지 마라.
 1. type은 반드시 "budget_recommendation"이어야 한다.
 2. budget_details의 key는 사용 가능한 변동 지출 카테고리 중에서만 선택해라.
 3. budget_details의 value는 반드시 정수여야 한다.
-4. budget_details의 총합은 total_budget을 넘으면 안 된다.
-5. JSON만 출력해라.
-6. 현재 산정된 예산안이 비어 있지 않다면, 기존 예산안을 참고하여 더 현실적인 방향으로 조정해라.
-7. 현재 예산안이 비어 있다면, 실제 변동 지출 기록을 기준으로 새 예산안을 만들어라.
+4. budget_details의 총합은 total_budget을 넘으면 안 되며, 남은 잔액은 미할당 자금으로 귀속되므로 억지로 기타 카테고리를 만들어 돈을 다 채우지 마라.
+5. budget_details에 작성되는 모든 카테고리별 예산 금액은, [당월 실시간 변동 지출 기록]에 찍혀 있는 각 카테고리별 '실제 누적 지출액'보다 절대 작아서는 안 됩니다. (예산 금액 >= 당월 실시간 누적 지출액) 규칙을 절대 위반하지 마라.
+6. JSON만 출력해라.
 """
-
+    
     answer = call_gemini(prompt)
     return parse_ai_budget_response(answer)
 
@@ -1141,12 +1199,6 @@ def create_budget_draft(
 
     answer_text = f"""
     {draft_data["message"]}
-
-    추천 예산안:
-    {json.dumps(draft_data["budget_details"], ensure_ascii=False, indent=2)}
-
-    남은 예산:
-    {json.dumps(draft_data["remaining_budget_details"], ensure_ascii=False, indent=2)}
     """.strip()
 
     save_chat_history(
@@ -1210,15 +1262,12 @@ def apply_budget_draft(
     # 적용 후 draft 삭제
     budget_draft_ref(uid, year_month).delete()
 
+    result = "\n".join([f"✅{key} 예산: {value}원" for key, value in budget_details.items()])
     answer_text = f"""
 AI 추천 예산안이 실제 예산안으로 적용되었습니다.
-
 적용된 예산안:
-{json.dumps(budget_details, ensure_ascii=False, indent=2)}
-
-남은 예산:
-{json.dumps(remaining_budget_details, ensure_ascii=False, indent=2)}
-""".strip()
+{result}
+"""
 
     save_chat_history(
         uid=uid,
@@ -1228,7 +1277,7 @@ AI 추천 예산안이 실제 예산안으로 적용되었습니다.
     )
 
     return {
-        "message": "AI 추천 예산안이 실제 예산안으로 적용되었습니다.",
+        "message": answer_text,
         "budget": load_budget(uid, year_month)
     }
 
@@ -1331,3 +1380,59 @@ def recommend_and_save_budget(
         "budget": load_budget(uid, year_month)
     }
 """
+
+def load_last_month_data(uid: str, current_year_month: str) -> Dict[str, Any]:
+    """
+    현재 연월(current_year_month: 'YYYY-MM')을 기준으로 
+    직전 달(지난달)의 요약본 문서와 실제 소비 내역 리스트를 동시에 로드하여 반환합니다.
+    """
+    # 1. 날짜 연산: "2026-06" -> 1달 전인 "2026-05" 계산
+    try:
+        current_date = datetime.strptime(current_year_month, "%Y-%m")
+        last_date = current_date - relativedelta(months=1)
+        last_year_month = last_date.strftime("%Y-%m")  # 예: "2026-05"
+    except ValueError:
+        # 날짜 형식이 잘못 들어온 경우 방어 처리
+        return {"last_month_summary": {}, "last_month_expenses": []}
+
+    # Base 레퍼런스 정의
+    user_doc_ref = db.collection("users").document(uid)
+
+    # ------------------------------------------------------------------
+    # [파트 1] 지난달 요약본(Summary) 로드
+    # 요약본의 문서 이름(ID)이 year_month와 동일하므로 단일 문서(document) 조회가 가능합니다.
+    # ------------------------------------------------------------------
+    last_summary_doc = user_doc_ref.collection("summaries").document(last_year_month).get()
+    
+    last_month_expenses_details = {} 
+    if last_summary_doc.exists:
+        summary_data = last_summary_doc.to_dict()
+        # + 요약본 데이터에서 'variable_expense_details' 키만 안전하게 추출
+        last_month_expenses_details = summary_data.get("variable_expense_details", {})
+
+    # ------------------------------------------------------------------
+    # [파트 2] 지난달 소비 내역(Expenses) 로드
+    # date 키의 값이 "2026-05-01" 형식이므로, 지난달 1일(이상)부터 이번달 1일(미만)까지 범위 쿼리를 수행합니다.
+    # ------------------------------------------------------------------
+    start_date_str = f"{last_year_month}-01"              # 예: "2026-05-01"
+    end_date_str = f"{current_year_month}-01"             # 예: "2026-06-01"
+
+    expense_docs = (
+        user_doc_ref.collection("expenses")
+        .where("date", ">=", start_date_str)
+        .where("date", "<", end_date_str)
+        .stream()
+    )
+
+    last_month_expenses = []
+    for doc in expense_docs:
+        last_month_expenses.append({
+            "id": doc.id,
+            **doc.to_dict()
+        })
+
+    # 2. 하나의 딕셔너리 결과물로 패키징하여 반환
+    return {
+        "last_month_expenses_details": last_month_expenses_details,
+        "last_month_expenses": last_month_expenses
+    }
