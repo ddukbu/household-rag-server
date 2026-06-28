@@ -6,3 +6,4 @@ firebase-admin
 numpy
 python-multipart
 python-dateutil
+google-cloud-firestore>=2.16.0

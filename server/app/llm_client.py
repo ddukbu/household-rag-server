@@ -87,7 +87,8 @@ def call_embed_api(text: str) -> List[float]:
     payload = {
         "content": {
             "parts": [{"text": text}]
-        }
+        },
+        "outputDimensionality": 768 #임베딩 차원을 768개로 하향, 기본값은 3072?->Firestore Vector가 다루기엔 너무 큰 차원.
     }
 
     response = requests.post(

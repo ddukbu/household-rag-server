@@ -768,3 +768,34 @@ def delete_actual_fixed_expenses_by_item_id(
         deleted_count += 1
 
     return deleted_count
+
+
+#전체 Firestore 데이터 임베딩 재생성(Swagger UI에서 실행?)
+@app.post("/admin/migrate-embeddings-to-vector")
+def migrate_embeddings_to_vector(uid: str = Depends(verify_firebase_token)):
+    target_collections = ["expenses", "Incomes", "chat_history"]
+
+    updated_count = 0
+
+    for collection_name in target_collections:
+        docs = (
+            db.collection("users")
+            .document(uid)
+            .collection(collection_name)
+            .stream()
+        )
+
+        for doc in docs:
+            data = doc.to_dict()
+            embedding = data.get("embedding")
+
+            if isinstance(embedding, list):
+                doc.reference.update({
+                    "embedding": Vector(embedding)
+                })
+                updated_count += 1
+
+    return {
+        "message": "embedding Vector 타입 변환 완료",
+        "updated_count": updated_count
+    }

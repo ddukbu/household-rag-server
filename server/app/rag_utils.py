@@ -7,6 +7,8 @@ import numpy as np
 from app.firebase_client import get_firestore_client
 from app.llm_client import call_embed_api
 
+from google.cloud.firestore_v1.vector import Vector
+
 db = get_firestore_client()
 
 
@@ -67,7 +69,7 @@ def save_chat_history(uid: str, question: str, answer: str, mode: str = "general
         "question": question,
         "answer": answer,
         "context_text": context_text,
-        "embedding": embedding,
+        "embedding": Vector(embedding), #여기도 임베딩을 Firestore Vector 타입으로 저장
         "created_at": now.isoformat(),
     })
 

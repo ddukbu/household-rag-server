@@ -15,6 +15,8 @@ from app.llm_client import call_gemini, call_embed_api
 from app.rag_utils import load_chat_history, save_chat_history, retrieve_relevant_chat_history, cosine_similarity
 #마찬가지로 기본 rag util을 분리
 
+from google.cloud.firestore_v1.vector import Vector
+from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
 
 # db
 db = get_firestore_client()
@@ -93,7 +95,7 @@ def build_rag_record(data: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         **data,
-        "embedding": embedding
+        "embedding": Vector(embedding)#Firestore Vector 타입으로 임베딩 저장, 더 효율적인 검색에 사용
     }
 
 def update_summary(summary: SummaryIn, data: Union[ExpenseIn, IncomeIn], mode: str = "add"):
@@ -276,6 +278,74 @@ def load_budgets(uid: str) -> List[Dict[str, Any]]:
     # 모든 문서가 담긴 리스트 반환
     return budgets
 
+
+# Firestore에서 질문 임베딩과 유사한 데이터를 Vector 검색을 통해 가져오는 함수
+def vector_search_user_collection(
+    uid: str,
+    collection_name: str,
+    query_embedding: list[float],
+    limit: int = 5
+) -> List[Dict[str, Any]]:
+    query = (
+        db.collection("users")
+        .document(uid)
+        .collection(collection_name)
+        .find_nearest(
+            vector_field="embedding",
+            query_vector=Vector(query_embedding),
+            distance_measure=DistanceMeasure.COSINE,
+            limit=limit,
+        )
+    )
+
+    result = []
+
+    for doc in query.stream():
+        data = doc.to_dict()
+        data.pop("embedding", None)
+
+        result.append({
+            "id": doc.id,
+            "source": collection_name,
+            **data
+        })
+
+    return result
+
+def retrieve_relevant_docs_with_vector_search(
+    uid: str,
+    query: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    query_embedding = call_embed_api(query)
+
+    expenses = vector_search_user_collection(
+        uid=uid,
+        collection_name="expenses",
+        query_embedding=query_embedding,
+        limit=30
+    )
+
+    incomes = vector_search_user_collection(
+        uid=uid,
+        collection_name="Incomes",
+        query_embedding=query_embedding,
+        limit=30
+    )
+
+    histories = vector_search_user_collection(
+        uid=uid,
+        collection_name="chat_history",
+        query_embedding=query_embedding,
+        limit=3
+    )
+
+    return {
+        "expenses": expenses,
+        "incomes": incomes,
+        "histories": histories,
+    }
+
+
 def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
     """
     전체 데이터 리스트에서 RAG 관련 필드(score, embedding)를 제외하고
@@ -302,9 +372,6 @@ def retrieve_relevant_docs(
         question: str, 
         summaries: List[Dict[str, Any]],
         budgets: List[Dict[str, Any]],
-        expenses: List[Dict[str, Any]], 
-        incomes: List[Dict[str, Any]],
-        chat_histories: List[Dict[str, Any]], 
         ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     사용자 질문과 가장 관련성이 높은 상위 k개의 문서를 반환
@@ -351,13 +418,13 @@ def retrieve_relevant_docs(
     # 예산안
     relevant_budgets = filter_docs(budgets, threshold=0.8, min_k=2, max_k=3)
     # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
-    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=1, max_k=30)
+    #relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=1, max_k=30)
     # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
-    relevant_incomes = filter_docs(incomes, threshold=0.7, min_k=1, max_k=30)
+    #relevant_incomes = filter_docs(incomes, threshold=0.7, min_k=1, max_k=30)
     # 대화 내역: 문맥 파악용으로 최대 3개
-    relevant_histories = filter_docs(chat_histories, threshold=0.75, min_k=0, max_k=3)
+    #relevant_histories = filter_docs(chat_histories, threshold=0.75, min_k=0, max_k=3)
 
-    return relevant_summaries, relevant_budgets, relevant_expenses, relevant_incomes, relevant_histories
+    return relevant_summaries, relevant_budgets
 
 def build_prompt(
         question: str, 
@@ -438,15 +505,29 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     # 설정한 예산안 로드
     budgets = load_budgets(uid)
     # 데이터 로드
-    expenses = load_expenses(uid)
-    incomes = load_incomes(uid)
+    #expenses = load_expenses(uid)
+    #incomes = load_incomes(uid)
     # 대화 내역 로드
-    chat_histories = load_chat_history(uid)
+    chat_histories = load_chat_history(uid) # 기존 코드에서 docs에 추가되기에 일단 활성화
 
     # 시간 측정
     start = time.time()
+    
     # 데이터 추출
-    summaries, budgets, expenses, incomes, histories = retrieve_relevant_docs(transformed_query, summaries, budgets, expenses, incomes, chat_histories)
+    
+    # 우선 요약본과 예산은 기존 방식대로 추출
+    summaries, budgets = retrieve_relevant_docs(transformed_query, summaries, budgets)
+    
+    # 나머지 지출, 수입, 채팅 기록은 벡터 검색으로 추출
+    retrieved = retrieve_relevant_docs_with_vector_search(
+        uid=uid,
+        query=transformed_query
+    )
+
+    expenses = retrieved["expenses"]
+    incomes = retrieved["incomes"]
+    histories = retrieved["histories"]
+    
     # 시간측정
     retrieval_elapsed = time.time() - start
 
@@ -473,7 +554,7 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     docs.extend(budgets)
     docs.extend(expenses)
     docs.extend(incomes)
-    docs.extend(chat_histories)
+    docs.extend(chat_histories) # 왜 여기서 추출된 대화 기록이 아닌, 전체 대화 기록이 들어가나요?
     return {
         "answer": answer,
         "references": [doc["id"] for doc in docs],
