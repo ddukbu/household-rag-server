@@ -4,6 +4,7 @@ from typing import List
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from google.cloud.firestore_v1.vector import Vector
 
 from app.auth import verify_firebase_token
 from app.firebase_client import get_firestore_client
