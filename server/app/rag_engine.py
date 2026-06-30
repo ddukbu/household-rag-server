@@ -1,7 +1,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import Union, Dict, Any, List
+from typing import Union, Dict, Any, List, Tuple
 import numpy as np
 import requests
 import json
@@ -12,7 +12,9 @@ from typing import Dict
 #from app.budget import load_budgets
 from app.llm_client import call_gemini, call_embed_api
 #app.budget과 app.rag_engine 사이 순환 import 관계를 끊기 위해 call_gemini, call_embed_api 함수를 따로 app.llm_client에 분리.
-from app.rag_utils import load_chat_history, save_chat_history, retrieve_relevant_chat_history, cosine_similarity
+from app.rag_utils import load_chat_history, save_chat_history, cosine_similarity
+from google.cloud.firestore_v1.vector import Vector
+from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
 #마찬가지로 기본 rag util을 분리
 
 
@@ -37,7 +39,6 @@ class SummaryIn(BaseModel):
     saving: int = 0                                 # 저축
     budget_details: Dict[str, int] = {}             # 카테고리별 예산 설정
     """
-
 
 class ExpenseIn(BaseModel):
     date: str               # 날짜
@@ -86,14 +87,13 @@ def create_sentence(data: Dict[str, Any]) -> str:
     )
     raise ValueError(f"지원하지 않는 데이터 형식입니다: {data}")
 
-
 def build_rag_record(data: Dict[str, Any]) -> Dict[str, Any]:
     rag_text = create_sentence(data)
     embedding = call_embed_api(rag_text)
 
     return {
         **data,
-        "embedding": embedding
+        "embedding": Vector(embedding)
     }
 
 def update_summary(summary: SummaryIn, data: Union[ExpenseIn, IncomeIn], mode: str = "add"):
@@ -135,14 +135,6 @@ def update_summary(summary: SummaryIn, data: Union[ExpenseIn, IncomeIn], mode: s
         target_dict[cat] = target_dict.get(cat, 0) + amount_change
         if target_dict[cat] <= 0: del target_dict[cat]
 
-    """
-    # 3. 가용 예산(total_budget) 및 저축(saving) 자동 계산 (필요 시)
-    # 예: 가용 예산 = 고정 수익 - 고정 지출 - 저축
-    fixed_inc = sum(summary.fixed_income_details.values())
-    fixed_exp = sum(summary.fixed_expense_details.values())
-    summary.total_budget = fixed_inc - fixed_exp - summary.saving
-    """
-
     return summary
 
 def process_expense_change(uid: str, data: Union[ExpenseIn, IncomeIn], mode: str = "add"):
@@ -167,25 +159,33 @@ def process_expense_change(uid: str, data: Union[ExpenseIn, IncomeIn], mode: str
     updated_summary = update_summary(summary, data, mode)
     doc_ref.set(updated_summary.dict())
 
-
-#기존 call_embed_api를 llm_client.py로 이동.
-
-
-#기존 call_gemini를 llm_client.py로 이동.
-
-
 def transform_query(question: str) -> str:
     now = datetime.now()
     current_date = now.strftime("%Y-%m-%d")
     
     prompt = f"""
-현재 날짜는 {current_date}이다. 
-사용자의 질문에서 날짜 관련 표현(지난달, 이번달, 3월 등)이 있다면 이를 YYYY-MM 형식 또는 YYYY-MM-DD 형식으로 변환하여 질문에 포함시켜라.
-만약 날짜 언급이 없다면 질문을 그대로 반환해라.
+현재 날짜: {current_date}
 
-질문: {question}
-변환된 질문:"""
+[지시사항]
+1. 사용자의 질문에서 날짜 관련 표현(지난달, 이번달, 3월 등)을 찾아 YYYY-MM 형식의 절대 날짜로 변환하세요.
+2. 변환된 정보를 포함하여 질문을 재구성하세요.
+3. 다른 설명 없이 재구성된 질문만 반환하세요.
+4. 날짜 언급이 없다면 질문을 그대로 반환하세요.
+
+사용자의 질문: "{question}"
+"""
+    ##########
+
+    start = time.time()
     transformed = call_gemini(prompt)
+    delay = time.time() - start
+    #print(f"2.5 Flash 모델로 질문 전처리: {delay}")
+    """
+    start = time.time()
+    transformed = call_gemini(prompt, flag=True)
+    delay = time.time() - start
+    print(f"2.5 Flash Lite 모델로 질문 전처리: {delay}")
+    """
 
     return transformed if transformed else question
 
@@ -208,7 +208,6 @@ def load_monthly_summaries(uid: str) -> List[Dict[str, Any]]:
             **data
         })
     return summaries
-
 
 def load_expenses(uid: str) -> List[Dict[str, Any]]:
     """
@@ -289,75 +288,9 @@ def get_expenses_json(expenses: List[Dict[str, Any]]) -> str:
         # 제외 필드를 제외한 나머지 데이터만 추출
         clean_data = {k: v for k, v in exp.items() if k not in exclude_keys}
         clean_list.append(clean_data)
-
-    # 로그 출력
-    print("json 형태의 텍스트 생성")
-    print(json.dumps(clean_list, ensure_ascii=False, indent=4))
     
     # 한글 깨짐 방지를 위해 ensure_ascii=False 설정
     return json.dumps(clean_list, ensure_ascii=False, indent=4)
-
-
-def retrieve_relevant_docs(
-        question: str, 
-        summaries: List[Dict[str, Any]],
-        budgets: List[Dict[str, Any]],
-        expenses: List[Dict[str, Any]], 
-        incomes: List[Dict[str, Any]],
-        chat_histories: List[Dict[str, Any]], 
-        ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    사용자 질문과 가장 관련성이 높은 상위 k개의 문서를 반환
-    """
-
-    # 사용자 질문 임베딩
-    query_embedding = call_embed_api(question)
-
-    def filter_docs(
-            docs: List[Dict[str, Any]], 
-            threshold: float, 
-            min_k: int, 
-            max_k: int
-            )-> List[Dict[str, Any]]:
-        # 유사도를 포함한 문서를 담을 리스트
-        scored: List[Dict[str, Any]] = []
-        # 모든 문서의 유사도 계산
-        for doc in docs:
-            # 검색을 위한 임베딩 데이터가 없는 경우 계산에서 제외
-            if "embedding" not in doc or not doc["embedding"]: 
-                continue
-            # 유사도 계산
-            score = cosine_similarity(query_embedding, doc["embedding"])
-            # 유사도를 추가한 문서 리스트에 추가
-            scored.append({
-                **doc, 
-                "score": score
-            })
-        # 유사도 순 정렬
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        
-        # 임계치를 넘는 문서들 필터링
-        passed = [d for d in scored if d["score"] >= threshold]
-        
-        # 최소 개수(min_k) 보장: 임계치 못 넘어도 상위권은 가져옴
-        if len(passed) < min_k:
-            passed = scored[:min_k]
-        
-        # 최대 개수(max_k) 제한
-        return passed[:max_k]
-
-    # 요약본
-    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=1, max_k=3)
-    # 예산안
-    relevant_budgets = filter_docs(budgets, threshold=0.8, min_k=2, max_k=3)
-    # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
-    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=1, max_k=30)
-    # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
-    relevant_incomes = filter_docs(incomes, threshold=0.7, min_k=1, max_k=30)
-    # 대화 내역: 문맥 파악용으로 최대 3개
-    relevant_histories = filter_docs(chat_histories, threshold=0.75, min_k=0, max_k=3)
-
-    return relevant_summaries, relevant_budgets, relevant_expenses, relevant_incomes, relevant_histories
 
 def build_prompt(
         question: str, 
@@ -425,14 +358,186 @@ def build_prompt(
 답변 (핵심 위주로 친절하게):
 """.strip()
 
+##################
+def retrieve_relevant_docs_custom(
+        question: str, 
+        summaries: List[Dict[str, Any]],
+        budgets: List[Dict[str, Any]],
+        expenses: List[Dict[str, Any]], 
+        incomes: List[Dict[str, Any]],
+        chat_histories: List[Dict[str, Any]], 
+        ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    사용자 질문과 가장 관련성이 높은 상위 k개의 문서를 반환
+    """
 
-def answer_question(uid: str, question: str) -> Dict[str, Any]:
+    # 사용자 질문 임베딩
+    query_embedding = call_embed_api(question)
+
+    def filter_docs(
+            docs: List[Dict[str, Any]], 
+            threshold: float, 
+            min_k: int, 
+            max_k: int
+            )-> List[Dict[str, Any]]:
+        # 유사도를 포함한 문서를 담을 리스트
+        scored: List[Dict[str, Any]] = []
+        # 모든 문서의 유사도 계산
+        for doc in docs:
+            # 검색을 위한 임베딩 데이터가 없는 경우 계산에서 제외
+            if "embedding" not in doc or not doc["embedding"]: 
+                continue
+            # 유사도 계산
+            score = cosine_similarity(query_embedding, doc["embedding"])
+            # 유사도를 추가한 문서 리스트에 추가
+            scored.append({
+                **doc, 
+                "score": score
+            })
+        # 유사도 순 정렬
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        
+        # 임계치를 넘는 문서들 필터링
+        passed = [d for d in scored if d["score"] >= threshold]
+        
+        # 최소 개수(min_k) 보장: 임계치 못 넘어도 상위권은 가져옴
+        if len(passed) < min_k:
+            passed = scored[:min_k]
+        
+        # 최대 개수(max_k) 제한
+        return passed[:max_k]
+
+    # 요약본
+    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=1, max_k=3)
+    # 예산안
+    relevant_budgets = filter_docs(budgets, threshold=0.8, min_k=2, max_k=3)
+    # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
+    relevant_expenses = filter_docs(expenses, threshold=0.7, min_k=1, max_k=30)
+    # 개별 항목: 상세 내역은 관련 있는 것 위주로 최대 15개
+    relevant_incomes = filter_docs(incomes, threshold=0.7, min_k=1, max_k=30)
+    # 대화 내역: 문맥 파악용으로 최대 3개
+    relevant_histories = filter_docs(chat_histories, threshold=0.7, min_k=0, max_k=3)
+
+    return relevant_summaries, relevant_budgets, relevant_expenses, relevant_incomes, relevant_histories 
+
+def retrieve_relevant_docs_vector(
+        question: str, 
+        summaries: List[Dict[str, Any]],
+        budgets: List[Dict[str, Any]], 
+        ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    사용자 질문과 가장 관련성이 높은 상위 k개의 문서를 반환
+    """
+
+    # 사용자 질문 임베딩
+    query_embedding = call_embed_api(question)
+
+    def filter_docs(
+            docs: List[Dict[str, Any]], 
+            threshold: float, 
+            min_k: int, 
+            max_k: int
+            )-> List[Dict[str, Any]]:
+        # 유사도를 포함한 문서를 담을 리스트
+        scored: List[Dict[str, Any]] = []
+        # 모든 문서의 유사도 계산
+        for doc in docs:
+            # 검색을 위한 임베딩 데이터가 없는 경우 계산에서 제외
+            if "embedding" not in doc or not doc["embedding"]: 
+                continue
+            # 유사도 계산
+            score = cosine_similarity(query_embedding, doc["embedding"])
+            # 유사도를 추가한 문서 리스트에 추가
+            scored.append({
+                **doc, 
+                "score": score
+            })
+        # 유사도 순 정렬
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        
+        # 임계치를 넘는 문서들 필터링
+        passed = [d for d in scored if d["score"] >= threshold]
+        
+        # 최소 개수(min_k) 보장: 임계치 못 넘어도 상위권은 가져옴
+        if len(passed) < min_k:
+            passed = scored[:min_k]
+        
+        # 최대 개수(max_k) 제한
+        return passed[:max_k]
+
+    # 요약본
+    relevant_summaries = filter_docs(summaries, threshold=0.8, min_k=1, max_k=3)
+    # 예산안
+    relevant_budgets = filter_docs(budgets, threshold=0.8, min_k=2, max_k=3)
+
+    return relevant_summaries, relevant_budgets
+
+def retrieve_relevant_docs_keyword(
+        question: str, 
+        summaries: List[Dict[str, Any]],
+        budgets: List[Dict[str, Any]],
+        expenses: List[Dict[str, Any]], 
+        incomes: List[Dict[str, Any]],
+        chat_histories: List[Dict[str, Any]], 
+        ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    
+    # 1. 키워드 추출 및 정제 로직
+    def extract_refined_keywords(question: str) -> List[str]:
+        raw_words = question.split()
+        refined = set() 
+        for word in raw_words:
+            # 숫자, 불리언 제외 (대소문자 무관)
+            if word.isdigit() or word.lower() in ["true", "false"]:
+                continue
+            # 한 글자 제거
+            if len(word) <= 1:
+                continue
+            
+            refined.add(word) 
+            
+            # 키워드 확장: 조사 제거를 위한 슬라이싱
+            # 3글자 이상이면 뒤에서 1글자 제거 추가
+            if len(word) >= 3:
+                refined.add(word[:-1])
+            # 4글자 이상이면 뒤에서 2글자 제거 추가
+            if len(word) >= 4:
+                refined.add(word[:-2])
+        return list(refined)
+
+    keywords = extract_refined_keywords(question)
+    
+    # 2. 문서 필터링 로직
+    def filter_docs_by_keyword(docs: List[Dict[str, Any]], keywords: List[str]) -> List[Dict[str, Any]]:
+        matched = []
+        for doc in docs:
+            # 문서 내 모든 필드를 문자열로 결합 (embedding 제외)
+            target_text = " ".join([str(v) for k, v in doc.items() if k != "embedding"])
+            
+            # 어떤 키워드가 매칭되었는지 찾아내기
+            found_keywords = [kw for kw in keywords if kw in target_text]
+        
+            if found_keywords:
+                # 출력하여 확인 (문서 ID가 있다면 doc.get('id') 등으로 더 구별하기 좋습니다)
+                #print(f"매칭 성공! 문서: {doc.get('memo', '메모없음')} | 매칭된 키워드: {found_keywords}")
+                matched.append(doc)
+        return matched
+
+    # 3. 키워드 매칭 적용
+    relevant_summaries = filter_docs_by_keyword(summaries, keywords)[:3]
+    relevant_budgets = filter_docs_by_keyword(budgets, keywords)[:3]
+    relevant_expenses = filter_docs_by_keyword(expenses, keywords)[:30]
+    relevant_incomes = filter_docs_by_keyword(incomes, keywords)[:30]
+    relevant_histories = filter_docs_by_keyword(chat_histories, keywords)[:3]
+
+    return relevant_summaries, relevant_budgets, relevant_expenses, relevant_incomes, relevant_histories
+
+def answer_question_custom(uid: str, question: str) -> Dict[str, Any]:
     # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
     transformed_query = transform_query(question)
-    time.sleep(1.0)
-    # 로그 출력
-    print("변환된 질문: " + transformed_query)
+    time.sleep(0.5)
 
+    start_total = time.time()
+    start = time.time()
     # 월별 요약본 로드
     summaries = load_monthly_summaries(uid)
     # 설정한 예산안 로드
@@ -441,31 +546,23 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     expenses = load_expenses(uid)
     incomes = load_incomes(uid)
     # 대화 내역 로드
-    chat_histories = load_chat_history(uid)
+    histories = load_chat_history(uid)
 
-    # 시간 측정
-    start = time.time()
     # 데이터 추출
-    summaries, budgets, expenses, incomes, histories = retrieve_relevant_docs(transformed_query, summaries, budgets, expenses, incomes, chat_histories)
-    # 시간측정
+    summaries, budgets, expenses, incomes, histories = retrieve_relevant_docs_custom(transformed_query, summaries, budgets, expenses, incomes, histories)
     retrieval_elapsed = time.time() - start
+    print(f"데이터 로드 및 추출: {retrieval_elapsed}")
 
     # 프롬프트 생성
-    prompt = build_prompt(question, summaries, budgets, expenses, incomes, histories)
+    prompt = build_prompt(transformed_query, summaries, budgets, expenses, incomes, histories)
 
-    # 시간 측정
     gen_start = time.time()
     # api 호출
     answer = call_gemini(prompt)
-    # 시간 측정
     generation_elapsed = time.time() - gen_start
-    total_elapsed = retrieval_elapsed + generation_elapsed
-    # 로그 출력
-    print("답변")
-    print(answer)
-
-    # 대화 내용 저장
-    save_chat_history(uid, question, answer, "general")
+    print(f"답변 생성: {generation_elapsed}")
+    total_elapsed = time.time() - start_total
+    print(f"총 지연: {total_elapsed}")
 
     # 답변 반환
     docs = []
@@ -473,7 +570,8 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
     docs.extend(budgets)
     docs.extend(expenses)
     docs.extend(incomes)
-    docs.extend(chat_histories)
+    docs.extend(histories)
+
     return {
         "answer": answer,
         "references": [doc["id"] for doc in docs],
@@ -481,3 +579,255 @@ def answer_question(uid: str, question: str) -> Dict[str, Any]:
         "generation_seconds": round(generation_elapsed, 3),
         "total_seconds": round(total_elapsed, 3),
     }
+
+def answer_question_vector(uid: str, question: str) -> Dict[str, Any]:
+    # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
+    transformed_query = transform_query(question)
+    time.sleep(0.5)
+
+    start_total = time.time()
+    start = time.time()
+    # 월별 요약본 로드
+    summaries = load_monthly_summaries(uid)
+    # 설정한 예산안 로드
+    budgets = load_budgets(uid)
+    # 데이터 로드 및 대화 내역 로드
+    retrieved = retrieve_relevant_docs_with_vector_search(
+        uid=uid,
+        query=transformed_query
+    )
+    expenses = retrieved["expenses"][0:30]
+    incomes = retrieved["incomes"][0:30]
+    histories = retrieved["histories"][0:3]
+
+    # 데이터 추출
+    summaries, budgets = retrieve_relevant_docs_vector(transformed_query, summaries, budgets)
+    retrieval_elapsed = time.time() - start
+    print(f"데이터 로드 및 추출: {retrieval_elapsed}")
+
+    # 프롬프트 생성
+    prompt = build_prompt(transformed_query, summaries, budgets, expenses, incomes, histories)
+
+    gen_start = time.time()
+    # api 호출
+    answer = call_gemini(prompt)
+    generation_elapsed = time.time() - gen_start
+    print(f"답변 생성: {generation_elapsed}")
+    total_elapsed = time.time() - start_total
+    print(f"총 지연: {total_elapsed}")
+
+    # 답변 반환
+    docs = []
+    docs.extend(summaries)
+    docs.extend(budgets)
+    docs.extend(expenses)
+    docs.extend(incomes)
+    docs.extend(histories)
+
+    return {
+        "answer": answer,
+        "references": [doc["id"] for doc in docs],
+        "retrieval_seconds": round(retrieval_elapsed, 3),
+        "generation_seconds": round(generation_elapsed, 3),
+        "total_seconds": round(total_elapsed, 3),
+    }
+
+def vector_search_user_collection(
+    uid: str,
+    collection_name: str,
+    query_embedding: list[float],
+    limit: int = 5
+) -> List[Dict[str, Any]]:
+    
+    query = (
+        db.collection("users")
+        .document(uid)
+        .collection(collection_name)
+        .find_nearest(
+            vector_field="embedding",
+            query_vector=Vector(query_embedding),
+            distance_measure=DistanceMeasure.COSINE,
+            limit=limit,
+            distance_threshold=0.3
+        )
+    )
+
+    result = []
+
+    for doc in query.stream():
+        data = doc.to_dict()
+        data.pop("embedding", None)
+
+        result.append({
+            "id": doc.id,
+            "source": collection_name,
+            **data
+        })
+
+    return result
+
+def retrieve_relevant_docs_with_vector_search(
+    uid: str,
+    query: str,
+    top_k_each: int = 5
+) -> Dict[str, List[Dict[str, Any]]]:
+    query_embedding = call_embed_api(query)
+
+    expenses = vector_search_user_collection(
+        uid=uid,
+        collection_name="expenses",
+        query_embedding=query_embedding,
+        limit=30
+    )
+
+    incomes = vector_search_user_collection(
+        uid=uid,
+        collection_name="Incomes",
+        query_embedding=query_embedding,
+        limit=30
+    )
+
+    histories = vector_search_user_collection(
+        uid=uid,
+        collection_name="chat_history",
+        query_embedding=query_embedding,
+        limit=3
+    )
+
+    return {
+        "expenses": expenses,
+        "incomes": incomes,
+        "histories": histories,
+    }
+
+def answer_question_keyword(uid: str, question: str) -> Dict[str, Any]:
+    # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
+    transformed_query = transform_query(question)
+    time.sleep(0.5)
+
+
+    start_total = time.time()
+    start = time.time()
+    # 월별 요약본 로드
+    summaries = load_monthly_summaries(uid)
+    # 설정한 예산안 로드
+    budgets = load_budgets(uid)
+    # 데이터 로드
+    expenses = load_expenses(uid)
+    incomes = load_incomes(uid)
+    # 대화 내역 로드
+    histories = load_chat_history(uid)
+
+    # 데이터 추출
+    summaries, budgets, expenses, incomes, histories = retrieve_relevant_docs_keyword(question, summaries, budgets, expenses, incomes, histories)
+    retrieval_elapsed = time.time() - start
+    print(f"데이터 로드 및 추출: {retrieval_elapsed}")
+
+    # 프롬프트 생성
+    prompt = build_prompt(transformed_query, summaries, budgets, expenses, incomes, histories)
+
+    gen_start = time.time()
+    # api 호출
+    answer = call_gemini(prompt)
+    generation_elapsed = time.time() - gen_start
+    print(f"답변 생성: {generation_elapsed}")
+    total_elapsed = time.time() - start_total
+    print(f"총 지연: {total_elapsed}")
+
+    # 답변 반환
+    docs = []
+    docs.extend(summaries)
+    docs.extend(budgets)
+    docs.extend(expenses)
+    docs.extend(incomes)
+    docs.extend(histories)
+
+    return {
+        "answer": answer,
+        "references": [doc["id"] for doc in docs],
+        "retrieval_seconds": round(retrieval_elapsed, 3),
+        "generation_seconds": round(generation_elapsed, 3),
+        "total_seconds": round(total_elapsed, 3),
+    }
+
+def answer_question_all(uid: str, question: str) -> Dict[str, Any]:
+    # 사용자 질문의 날짜 관련 표현을 YYYY-MM or YYYY-MM-DD 형식으로 변환
+    transformed_query = transform_query(question)
+    time.sleep(0.5)
+
+    start_total = time.time()
+    start = time.time()
+    # 월별 요약본 로드
+    summaries = load_monthly_summaries(uid)
+    # 설정한 예산안 로드
+    budgets = load_budgets(uid)
+    # 데이터 로드
+    expenses = load_expenses(uid)
+    incomes = load_incomes(uid)
+    # 대화 내역 로드
+    histories = load_chat_history(uid)
+
+    retrieval_elapsed = time.time() - start
+    print(f"지출 항목 개수: {len(expenses)}, 이전 채팅 기록 개수: {len(histories)}, 월별 요약본 및 예산안 개수: {len(summaries)}")
+    print(f"데이터 로드 및 추출: {retrieval_elapsed}")
+
+    # 프롬프트 생성
+    prompt = build_prompt(transformed_query, summaries, budgets, expenses, incomes, histories)
+
+    gen_start = time.time()
+    # api 호출
+    answer = call_gemini(prompt)
+    generation_elapsed = time.time() - gen_start
+    print(f"답변 생성: {generation_elapsed}")
+    total_elapsed = time.time() - start_total
+    print(f"총 지연: {total_elapsed}")
+
+    # 답변 반환
+    docs = []
+    docs.extend(summaries)
+    docs.extend(budgets)
+    docs.extend(expenses)
+    docs.extend(incomes)
+    docs.extend(histories)
+
+    return {
+        "answer": answer,
+        "references": [doc["id"] for doc in docs],
+        "retrieval_seconds": round(retrieval_elapsed, 3),
+        "generation_seconds": round(generation_elapsed, 3),
+        "total_seconds": round(total_elapsed, 3),
+    }
+
+def answer_question(uid: str, question: str) -> Dict[str, Any]:
+    print("______________________________________________________________________________")
+    print("추출 없이 모든 데이터 사용")
+    answer = answer_question_all(uid, question)
+    print(answer["references"])
+    print()
+    time.sleep(10)
+
+    print("키워드 매칭")
+    answer = answer_question_keyword(uid, question)
+    print(answer["references"])
+    print()
+    time.sleep(10)
+    
+    print("임계치, 최소 및 최대 개수 지정을 통한 추출 방식")
+    answer = answer_question_custom(uid, question)
+    print(answer["references"])
+    print()
+    time.sleep(10)
+
+    print("임계치, 최소 및 최대 개수 지정을 통한 추출 방식과 firebase의 벡터 검색 기능 혼합")
+    answer = answer_question_vector(uid, question)
+    print(answer["references"])
+    print()
+    time.sleep(10)
+
+    start = time.time()
+    # 대화 내용 저장
+    save_chat_history(uid, question, answer, "general")
+    delay = time.time() - start
+    print(f"대화 내용 저장: {delay}")
+
+    return answer

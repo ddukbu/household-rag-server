@@ -7,23 +7,26 @@ import numpy as np
 from app.firebase_client import get_firestore_client
 from app.llm_client import call_embed_api
 
+from google.cloud.firestore_v1.vector import Vector
+from typing import List
+
 db = get_firestore_client()
 
 
-def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
-    """
-    벡터 a와 b 사이의 각도 코사인 값을 계산하여 유사도를 측정합니다.
-    결과값은 1.0에 가까울수록 매우 유사하고, 0.0에 가까울수록 관련이 없음을 의미합니다.
-    """
-    a = np.array(vec_a, dtype=np.float32)
-    b = np.array(vec_b, dtype=np.float32)
+def cosine_similarity(vec_a: Any, vec_b: Any) -> float:
+    # 각 인자가 객체(Vector 등)면 리스트로 변환, 아니면 그대로 사용
+    val_a = vec_a.tolist() if hasattr(vec_a, 'tolist') else vec_a
+    val_b = vec_b.tolist() if hasattr(vec_b, 'tolist') else vec_b
+    
+    # 이제 둘 다 완벽한 리스트가 되었습니다
+    a = np.array(val_a, dtype=np.float32)
+    b = np.array(val_b, dtype=np.float32)
 
     denom = np.linalg.norm(a) * np.linalg.norm(b)
     if denom == 0:
         return 0.0
 
     return float(np.dot(a, b) / denom)
-
 
 def load_chat_history(uid: str) -> List[Dict[str, Any]]:
     """
@@ -67,7 +70,7 @@ def save_chat_history(uid: str, question: str, answer: str, mode: str = "general
         "question": question,
         "answer": answer,
         "context_text": context_text,
-        "embedding": embedding,
+        "embedding": Vector(embedding),
         "created_at": now.isoformat(),
     })
 

@@ -13,6 +13,12 @@ GENERATE_URL = (
     f"{GENERATION_MODEL}:generateContent"
 )
 
+GENERATION_MODEL_lite = "gemini-2.5-flash-lite"
+GENERATE_URL_lite = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GENERATION_MODEL_lite}:generateContent"
+)
+
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBED_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -21,7 +27,7 @@ EMBED_URL = (
 
 
 
-def call_gemini(prompt: str) -> str:
+def call_gemini(prompt: str, flag: bool = False) -> str:
     """
     작성된 프롬프트를 Gemini 모델에 전달하고 AI의 답변 반환
     네트워크 오류 발생 시 최대 3번까지 재시도
@@ -46,13 +52,20 @@ def call_gemini(prompt: str) -> str:
     delay = 2
 
     for attempt in range(max_retries):
-        response = requests.post(
-            GENERATE_URL,
-            headers=headers,
-            json=payload,
-            timeout=120
-        )
-
+        if flag:
+            response = requests.post(
+                GENERATE_URL_lite,
+                headers=headers,
+                json=payload,
+                timeout=120
+            )
+        else:
+            response = requests.post(
+                GENERATE_URL,
+                headers=headers,
+                json=payload,
+                timeout=120
+            )
         if response.status_code == 200:
             data = response.json()
             candidates = data.get("candidates", [])
@@ -87,8 +100,10 @@ def call_embed_api(text: str) -> List[float]:
     payload = {
         "content": {
             "parts": [{"text": text}]
-        }
+        },
+        "outputDimensionality": 768 #임베딩 차원을 768개로 하향, 기본값은 3072?->Firestore Vector가 다루기엔 너무 큰 차원.
     }
+
 
     response = requests.post(
         EMBED_URL,
